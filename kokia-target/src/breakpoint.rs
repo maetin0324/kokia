@@ -45,8 +45,17 @@ impl SoftwareBreakpoint {
             return Ok(());
         }
 
-        // 元のバイトを保存
-        self.original_byte = memory.read_u8(self.address as usize)?;
+        // アドレスが有効なメモリマッピング内にあるか確認
+        if !memory.is_mapped(self.address as usize)? {
+            return Err(anyhow::anyhow!(
+                "Cannot set breakpoint at 0x{:x}: address is not in a valid memory mapping",
+                self.address
+            ));
+        }
+
+        // 元のバイトを保存（PTRACE_PEEKDATAを使用）
+        let bytes = memory.read_via_ptrace(self.address as usize, 1)?;
+        self.original_byte = bytes[0];
 
         // INT3命令で置き換え
         memory.write_u8(self.address as usize, INT3_OPCODE)?;

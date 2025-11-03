@@ -3,46 +3,96 @@
 //! Rustの非同期関数デバッガ kokia のREPLインターフェース
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use kokia_core::{Command, Debugger};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
-use std::env;
+
+/// Kokia - Rust Async Debugger
+#[derive(Parser)]
+#[command(name = "kokia")]
+#[command(version = "0.1.0")]
+#[command(about = "Runtime-independent debugger for Rust async functions", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: DebugCommand,
+}
+
+#[derive(Subcommand)]
+enum DebugCommand {
+    /// Launch and debug an executable
+    Run {
+        /// Path to the executable binary
+        binary: String,
+
+        /// Arguments to pass to the program
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Attach to an existing process
+    Attach {
+        /// Path to the executable binary
+        binary: String,
+
+        /// Process ID to attach to
+        #[arg(short, long)]
+        pid: i32,
+    },
+}
 
 fn main() -> Result<()> {
     println!("Kokia - Rust Async Debugger");
     println!("Version 0.1.0");
     println!();
 
-    // コマンドライン引数をパース
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: {} <binary-path> <pid>", args[0]);
-        eprintln!();
-        eprintln!("Example:");
-        eprintln!("  {} ./target/debug/simple_async 12345", args[0]);
-        std::process::exit(1);
-    }
+    let cli = Cli::parse();
+    let mut debugger = init_debugger(cli.command)?;
+    run_repl(&mut debugger)?;
 
-    let binary_path = &args[1];
-    let pid: i32 = args[2].parse()
-        .map_err(|_| anyhow::anyhow!("Invalid PID: {}", args[2]))?;
+    Ok(())
+}
 
-    println!("Loading binary: {}", binary_path);
-    println!("Attaching to process: {}", pid);
-    println!();
-
-    // デバッガを初期化
+/// デバッガを初期化してプロセスにアタッチまたは起動する
+fn init_debugger(command: DebugCommand) -> Result<Debugger> {
     let mut debugger = Debugger::new();
 
-    // バイナリからDWARF情報を読み込む
-    debugger.load_binary(binary_path)?;
-    println!("Loaded DWARF information from {}", binary_path);
+    match command {
+        DebugCommand::Run { binary, args } => {
+            println!("Loading binary: {}", binary);
+            println!();
 
-    // プロセスにアタッチ
-    debugger.attach(pid)?;
-    println!("Attached to process {}", pid);
-    println!();
+            // バイナリからDWARF情報を読み込む
+            debugger.load_binary(&binary)?;
+            println!("Loaded DWARF information from {}", binary);
 
+            // プロセスを起動
+            debugger.spawn(&binary, &args)?;
+            println!("Process spawned and stopped at entry point");
+            println!("Set breakpoints and use 'continue' to start execution");
+            println!();
+        }
+        DebugCommand::Attach { binary, pid } => {
+            println!("Loading binary: {}", binary);
+            println!("Attaching to process: {}", pid);
+            println!();
+
+            // バイナリからDWARF情報を読み込む
+            debugger.load_binary(&binary)?;
+            println!("Loaded DWARF information from {}", binary);
+
+            // プロセスにアタッチ
+            debugger.attach(pid)?;
+            println!("Attached to process {}", pid);
+            println!();
+        }
+    }
+
+    Ok(debugger)
+}
+
+/// REPLループを実行する
+fn run_repl(debugger: &mut Debugger) -> Result<()> {
     println!("Type 'help' for available commands, 'quit' to exit.");
     println!();
 
@@ -59,7 +109,7 @@ fn main() -> Result<()> {
 
                 rl.add_history_entry(line)?;
 
-                if let Err(e) = handle_command(&mut debugger, line) {
+                if let Err(e) = handle_command(debugger, line) {
                     eprintln!("Error: {}", e);
                 }
             }
@@ -81,85 +131,104 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// シンボルリストを表示するヘルパー関数
+fn print_symbol_list(title: &str, symbols: &[kokia_core::Symbol], limit: Option<usize>) {
+    if symbols.is_empty() {
+        println!("No {} found", title);
+        return;
+    }
+
+    let display_limit = limit.unwrap_or(symbols.len());
+    println!("{} ({} found):", title, symbols.len());
+
+    for (i, sym) in symbols.iter().take(display_limit).enumerate() {
+        if sym.size > 0 {
+            println!("  {}. {} @ 0x{:x} (size: {})", i + 1, sym.name, sym.address, sym.size);
+        } else {
+            println!("  {}. {} @ 0x{:x}", i + 1, sym.name, sym.address);
+        }
+    }
+
+    if symbols.len() > display_limit {
+        println!("  ... and {} more", symbols.len() - display_limit);
+    }
+}
+
 fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
     let parsed_command = Command::parse(line);
 
     match parsed_command {
-        Some(Command::Help) => {
-            print_help();
-        }
-        Some(Command::Quit) => {
-            println!("Goodbye!");
-            std::process::exit(0);
-        }
-        Some(Command::Break(loc)) => {
-            // シンボル名からアドレスを解決
-            if let Some(addr) = debugger.resolve_symbol(&loc) {
-                let bp_id = debugger.set_breakpoint(addr)?;
-                println!("Breakpoint {} set at {} (0x{:x})", bp_id, loc, addr);
-            } else {
-                // 16進数アドレスとして解釈を試みる
-                if let Ok(addr) = u64::from_str_radix(&loc.trim_start_matches("0x"), 16) {
-                    let bp_id = debugger.set_breakpoint(addr)?;
-                    println!("Breakpoint {} set at 0x{:x}", bp_id, addr);
-                } else {
-                    println!("Symbol not found: {}", loc);
-                }
-            }
-        }
-        Some(Command::Continue) => {
-            println!("Continuing execution...");
-            debugger.continue_execution()?;
-        }
-        Some(Command::AsyncBacktrace) => {
-            let async_symbols = debugger.find_async_symbols();
-            if async_symbols.is_empty() {
-                println!("No async functions found");
-            } else {
-                println!("Async functions ({} found):", async_symbols.len());
-                for (i, sym) in async_symbols.iter().take(10).enumerate() {
-                    println!("  {}. {} @ 0x{:x}", i + 1, sym.name, sym.address);
-                }
-                if async_symbols.len() > 10 {
-                    println!("  ... and {} more", async_symbols.len() - 10);
-                }
-            }
-        }
-        None => {
-            // カスタムコマンド処理
-            if line.starts_with("find ") {
-                let pattern = &line[5..];
-                let symbols = debugger.find_symbols(pattern);
-                println!("Found {} symbols matching '{}':", symbols.len(), pattern);
-                for (i, sym) in symbols.iter().take(10).enumerate() {
-                    println!("  {}. {} @ 0x{:x}", i + 1, sym.name, sym.address);
-                }
-                if symbols.len() > 10 {
-                    println!("  ... and {} more", symbols.len() - 10);
-                }
-            } else if line.starts_with("async ") {
-                // async関連のコマンド
-                handle_async_command(debugger, &line[6..])?;
-            } else {
-                println!("Unknown command: {}", line);
-                println!("Type 'help' for available commands.");
-            }
-        }
-        _ => {
-            println!("Command not yet implemented: {}", line);
-        }
+        Some(Command::Help) => print_help(),
+        Some(Command::Quit) => handle_quit(),
+        Some(Command::Break(loc)) => handle_break(debugger, &loc)?,
+        Some(Command::Continue) => handle_continue(debugger)?,
+        Some(Command::AsyncBacktrace) => handle_async_backtrace(debugger)?,
+        None => handle_custom_command(debugger, line)?,
+        _ => println!("Command not yet implemented: {}", line),
     }
 
+    Ok(())
+}
+
+/// Quitコマンドを処理する
+fn handle_quit() {
+    println!("Goodbye!");
+    std::process::exit(0);
+}
+
+/// Breakコマンドを処理する
+fn handle_break(debugger: &mut Debugger, loc: &str) -> Result<()> {
+    // シンボル名からアドレスを解決
+    if let Some(addr) = debugger.resolve_symbol(loc) {
+        let bp_id = debugger.set_breakpoint(addr)?;
+        println!("Breakpoint {} set at {} (0x{:x})", bp_id, loc, addr);
+    } else {
+        // 16進数アドレスとして解釈を試みる
+        if let Ok(addr) = u64::from_str_radix(&loc.trim_start_matches("0x"), 16) {
+            let bp_id = debugger.set_breakpoint(addr)?;
+            println!("Breakpoint {} set at 0x{:x}", bp_id, addr);
+        } else {
+            println!("Symbol not found: {}", loc);
+        }
+    }
+    Ok(())
+}
+
+/// Continueコマンドを処理する
+fn handle_continue(debugger: &mut Debugger) -> Result<()> {
+    println!("Continuing execution...");
+    debugger.continue_execution()?;
+    Ok(())
+}
+
+/// AsyncBacktraceコマンドを処理する
+fn handle_async_backtrace(debugger: &mut Debugger) -> Result<()> {
+    let async_symbols = debugger.find_async_symbols();
+    print_symbol_list("Async functions", &async_symbols, Some(10));
+    Ok(())
+}
+
+/// カスタムコマンドを処理する
+fn handle_custom_command(debugger: &mut Debugger, line: &str) -> Result<()> {
+    if line.starts_with("find ") {
+        let pattern = &line[5..];
+        let symbols = debugger.find_symbols(pattern);
+        let title = format!("Symbols matching '{}'", pattern);
+        print_symbol_list(&title, &symbols, Some(10));
+    } else if line.starts_with("async ") {
+        // async関連のコマンド
+        handle_async_command(debugger, &line[6..])?;
+    } else {
+        println!("Unknown command: {}", line);
+        println!("Type 'help' for available commands.");
+    }
     Ok(())
 }
 
 fn handle_async_command(debugger: &mut Debugger, cmd: &str) -> Result<()> {
     if cmd == "list" || cmd == "ls" {
         let async_symbols = debugger.find_async_symbols();
-        println!("Async-related symbols ({} found):", async_symbols.len());
-        for (i, sym) in async_symbols.iter().enumerate() {
-            println!("  {}. {} @ 0x{:x} (size: {})", i + 1, sym.name, sym.address, sym.size);
-        }
+        print_symbol_list("Async-related symbols", &async_symbols, None);
     } else {
         println!("Unknown async command: {}", cmd);
     }

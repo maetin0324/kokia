@@ -7,7 +7,9 @@
       "Bash(cargo build:*)",
       "Bash(cargo run:*)",
       "Bash(nm:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(./target/release/kokia:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

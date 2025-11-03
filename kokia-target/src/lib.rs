@@ -11,7 +11,7 @@ pub mod breakpoint;
 
 pub use process::Process;
 pub use thread::{Thread, ThreadId};
-pub use memory::Memory;
+pub use memory::{Memory, MemoryMapping};
 pub use registers::Registers;
 pub use breakpoint::{SoftwareBreakpoint, HardwareBreakpoint};
 

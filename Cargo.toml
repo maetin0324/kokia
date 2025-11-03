@@ -37,4 +37,5 @@ thiserror = "1"
 
 # CLI/REPL
 rustyline = "13"
+clap = { version = "4", features = ["derive"] }
 home = "=0.5.11"
