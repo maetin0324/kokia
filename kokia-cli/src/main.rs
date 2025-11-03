@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use kokia_core::{Command, Debugger};
+use kokia_core::{Command, Debugger, StopReason};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
@@ -68,8 +68,9 @@ fn init_debugger(command: DebugCommand) -> Result<Debugger> {
 
             // プロセスを起動
             debugger.spawn(&binary, &args)?;
-            println!("Process spawned and stopped at entry point");
-            println!("Set breakpoints and use 'continue' to start execution");
+            println!("Process spawned and stopped at first instruction");
+            println!("Memory mappings are now initialized");
+            println!("Set breakpoints and use 'continue' to continue execution");
             println!();
         }
         DebugCommand::Attach { binary, pid } => {
@@ -178,26 +179,65 @@ fn handle_quit() {
 
 /// Breakコマンドを処理する
 fn handle_break(debugger: &mut Debugger, loc: &str) -> Result<()> {
-    // シンボル名からアドレスを解決
-    if let Some(addr) = debugger.resolve_symbol(loc) {
-        let bp_id = debugger.set_breakpoint(addr)?;
-        println!("Breakpoint {} set at {} (0x{:x})", bp_id, loc, addr);
-    } else {
-        // 16進数アドレスとして解釈を試みる
+    // まず16進数アドレスとして解釈を試みる
+    if loc.starts_with("0x") || loc.chars().all(|c| c.is_ascii_hexdigit()) {
         if let Ok(addr) = u64::from_str_radix(&loc.trim_start_matches("0x"), 16) {
             let bp_id = debugger.set_breakpoint(addr)?;
             println!("Breakpoint {} set at 0x{:x}", bp_id, addr);
-        } else {
-            println!("Symbol not found: {}", loc);
+            return Ok(());
         }
     }
-    Ok(())
+
+    // シンボル名として解釈（PIEの場合のみベースアドレスを加算）
+    match debugger.set_breakpoint_by_symbol(loc) {
+        Ok(bp_id) => {
+            println!("Breakpoint {} set at symbol '{}'", bp_id, loc);
+            Ok(())
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+            Ok(())
+        }
+    }
 }
 
 /// Continueコマンドを処理する
 fn handle_continue(debugger: &mut Debugger) -> Result<()> {
     println!("Continuing execution...");
-    debugger.continue_execution()?;
+
+    let stop_reason = debugger.continue_and_wait()?;
+
+    match stop_reason {
+        StopReason::Breakpoint => {
+            println!();
+            println!("Breakpoint hit!");
+
+            // PCを取得
+            let pc = debugger.get_pc()?;
+            println!("Stopped at 0x{:x}", pc);
+
+            // シンボルを逆引き
+            if let Some(symbol) = debugger.reverse_resolve(pc) {
+                println!("In function: {}", symbol.name);
+                if symbol.size > 0 {
+                    println!("Function address: 0x{:x}, size: {}", symbol.address, symbol.size);
+                }
+            }
+        }
+        StopReason::Signal(signal) => {
+            println!();
+            println!("Received signal: {:?}", signal);
+        }
+        StopReason::Exited(code) => {
+            println!();
+            println!("Process exited with code {}", code);
+        }
+        StopReason::Other => {
+            println!();
+            println!("Process stopped (unknown reason)");
+        }
+    }
+
     Ok(())
 }
 

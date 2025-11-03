@@ -13,6 +13,7 @@ pub use command::Command;
 
 // 他のクレートから使用するために再エクスポート
 pub use kokia_dwarf::Symbol;
+pub use kokia_target::StopReason;
 
 /// デバッガの結果型
 pub type Result<T> = anyhow::Result<T>;

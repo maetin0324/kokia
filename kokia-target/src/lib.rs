@@ -9,7 +9,7 @@ pub mod memory;
 pub mod registers;
 pub mod breakpoint;
 
-pub use process::Process;
+pub use process::{Process, StopReason};
 pub use thread::{Thread, ThreadId};
 pub use memory::{Memory, MemoryMapping};
 pub use registers::Registers;

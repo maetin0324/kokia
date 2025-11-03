@@ -9,7 +9,8 @@
       "Bash(nm:*)",
       "Bash(cargo test:*)",
       "Bash(./target/release/kokia:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(gdb:*)"
     ],
     "deny": [],
     "ask": []

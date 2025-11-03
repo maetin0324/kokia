@@ -171,6 +171,43 @@ impl Memory {
         Ok(mappings.iter().any(|m| addr >= m.start && addr < m.end))
     }
 
+    /// 実行可能ファイルのベースアドレスを取得する
+    ///
+    /// PIE（Position Independent Executable）の場合、実行時にランダムなアドレスにロードされます。
+    /// このメソッドは、実行可能ファイルの最初の実行可能セグメントのベースアドレスを返します。
+    pub fn get_base_address(&self) -> Result<usize> {
+        let maps_path = format!("/proc/{}/maps", self.pid);
+        let file = File::open(&maps_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", maps_path, e))?;
+        let reader = BufReader::new(file);
+
+        // 最初の実行可能セグメントを見つける
+        for line in reader.lines() {
+            let line = line?;
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            // アドレス範囲とパーミッションをパース
+            let addr_parts: Vec<&str> = parts[0].split('-').collect();
+            if addr_parts.len() != 2 {
+                continue;
+            }
+
+            let perms = parts[1];
+
+            // 実行可能（x）フラグがあるセグメントを探す
+            if perms.chars().nth(2) == Some('x') {
+                let start = usize::from_str_radix(addr_parts[0], 16)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse base address: {}", e))?;
+                return Ok(start);
+            }
+        }
+
+        Err(anyhow::anyhow!("Could not find executable segment in memory mappings"))
+    }
+
     /// PTRACE_PEEKDATAを使用してメモリからデータを読み取る
     ///
     /// /proc/pid/memが使用できない場合のフォールバック。

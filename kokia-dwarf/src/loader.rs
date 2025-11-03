@@ -65,4 +65,18 @@ impl DwarfLoader {
     pub fn object_file(&self) -> &object::File<'static> {
         &self.object_file
     }
+
+    /// PIE（Position Independent Executable）かどうかを判定する
+    ///
+    /// PIE実行ファイルの場合、シンボルアドレスはオフセットであり、
+    /// 実行時ベースアドレスを加算する必要があります。
+    /// 非PIE実行ファイルの場合、シンボルアドレスは絶対アドレスです。
+    pub fn is_pie(&self) -> bool {
+        use object::ObjectKind;
+
+        // ELFのタイプを確認
+        // ET_DYN (Dynamic/Shared Object) = PIE実行ファイルまたは共有ライブラリ
+        // ET_EXEC (Executable) = 非PIE実行ファイル
+        matches!(self.object_file.kind(), ObjectKind::Dynamic)
+    }
 }

@@ -10,7 +10,7 @@ pub mod variables;
 
 pub use loader::DwarfLoader;
 pub use symbols::{Symbol, SymbolResolver};
-pub use lines::LineInfo;
+pub use lines::{LineInfo, LineInfoProvider};
 pub use variables::VariableLocator;
 
 /// DWARF解析の結果型

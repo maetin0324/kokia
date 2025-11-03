@@ -1,8 +1,22 @@
 //! プロセス制御機能
 
 use crate::Result;
+use nix::sys::signal::Signal;
 use std::ffi::CString;
 use std::path::Path;
+
+/// 停止イベントの種類
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    /// ブレークポイントヒット（SIGTRAP）
+    Breakpoint,
+    /// シグナル受信
+    Signal(Signal),
+    /// プロセス終了
+    Exited(i32),
+    /// その他の停止
+    Other,
+}
 
 /// デバッグ対象のプロセス
 pub struct Process {
@@ -95,6 +109,36 @@ impl Process {
     pub fn continue_execution(&self) -> Result<()> {
         nix::sys::ptrace::cont(self.pid, None)?;
         Ok(())
+    }
+
+    /// プロセスを実行継続して停止イベントを待機する
+    ///
+    /// プロセスを実行継続し、次の停止イベント（ブレークポイント、シグナル、終了など）まで待機します。
+    pub fn continue_and_wait(&self) -> Result<StopReason> {
+        use nix::sys::ptrace;
+        use nix::sys::wait::{waitpid, WaitStatus};
+
+        // プロセスを実行継続
+        ptrace::cont(self.pid, None)?;
+
+        // 停止イベントを待機
+        let status = waitpid(self.pid, None)?;
+
+        match status {
+            WaitStatus::Stopped(_, signal) => {
+                // SIGTRAPはブレークポイントヒット
+                if signal == Signal::SIGTRAP {
+                    Ok(StopReason::Breakpoint)
+                } else {
+                    Ok(StopReason::Signal(signal))
+                }
+            }
+            WaitStatus::Exited(_, code) => Ok(StopReason::Exited(code)),
+            WaitStatus::Signaled(_, signal, _) => {
+                Ok(StopReason::Signal(signal))
+            }
+            _ => Ok(StopReason::Other),
+        }
     }
 
     /// プロセスを停止する（シグナルを送信）

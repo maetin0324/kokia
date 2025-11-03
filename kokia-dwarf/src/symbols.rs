@@ -18,6 +18,8 @@ pub struct SymbolResolver {
     symbols_by_name: HashMap<String, Symbol>,
     /// アドレス -> シンボル情報のマップ（ソート済み）
     symbols_by_address: Vec<Symbol>,
+    /// PIE（Position Independent Executable）かどうか
+    is_pie: bool,
 }
 
 impl SymbolResolver {
@@ -48,10 +50,19 @@ impl SymbolResolver {
         // アドレスでソート
         symbols_by_address.sort_by_key(|s| s.address);
 
+        // PIE判定
+        let is_pie = loader.is_pie();
+
         Ok(Self {
             symbols_by_name,
             symbols_by_address,
+            is_pie,
         })
+    }
+
+    /// PIE（Position Independent Executable）かどうかを取得する
+    pub fn is_pie(&self) -> bool {
+        self.is_pie
     }
 
     /// シンボル名からアドレスを解決する
