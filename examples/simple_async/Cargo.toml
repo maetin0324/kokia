@@ -1,0 +1,12 @@
+[package]
+name = "simple_async"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "simple_async"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true

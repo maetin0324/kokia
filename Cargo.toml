@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "kokia-core",
+    "kokia-async",
+    "kokia-target",
+    "kokia-dwarf",
+    "kokia-cli",
+    "examples/simple_async",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["kokia developers"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/kokia"
+
+[workspace.dependencies]
+# Async runtime (for testing)
+tokio = { version = "1", features = ["full"] }
+
+# ptrace and system interfaces
+nix = { version = "0.29", features = ["process", "signal", "ptrace"] }
+
+# DWARF debugging information
+gimli = "0.31"
+object = { version = "0.36", features = ["read"] }
+addr2line = "0.24"
+
+# Regular expressions for GenFuture name matching
+regex = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# CLI/REPL
+rustyline = "13"
+home = "=0.5.11"

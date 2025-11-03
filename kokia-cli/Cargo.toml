@@ -1,0 +1,17 @@
+[package]
+name = "kokia-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kokia"
+path = "src/main.rs"
+
+[dependencies]
+kokia-core = { path = "../kokia-core" }
+rustyline.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]

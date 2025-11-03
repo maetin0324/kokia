@@ -1,0 +1,13 @@
+[package]
+name = "kokia-target"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nix.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
