@@ -119,7 +119,7 @@ impl<'a> LineInfoProvider<'a> {
     /// LineRowから行番号情報を抽出する
     fn extract_line_info(
         &self,
-        _unit: &gimli::Unit<EndianSlice<'static, RunTimeEndian>>,
+        unit: &gimli::Unit<EndianSlice<'static, RunTimeEndian>>,
         row: &gimli::LineRow,
     ) -> Result<LineInfo> {
         let address = row.address();
@@ -129,8 +129,8 @@ impl<'a> LineInfoProvider<'a> {
             gimli::ColumnType::Column(col) => Some(col.get()),
         };
 
-        // ファイル名を取得（簡略化版）
-        let file = None; // TODO: ファイル名の取得は複雑なので一旦スキップ
+        // ファイル名を取得
+        let file = self.get_file_name(unit, row);
 
         Ok(LineInfo {
             address,
@@ -138,5 +138,76 @@ impl<'a> LineInfoProvider<'a> {
             line,
             column,
         })
+    }
+
+    /// LineRowからファイル名を取得する
+    fn get_file_name(
+        &self,
+        unit: &gimli::Unit<EndianSlice<'static, RunTimeEndian>>,
+        row: &gimli::LineRow,
+    ) -> Option<String> {
+        let dwarf = self.loader.dwarf();
+        let file_index = row.file_index();
+
+        // line_programからファイル名を取得
+        if let Some(line_program) = &unit.line_program {
+            if let Some(file_entry) = line_program.header().file(file_index) {
+                // ファイルパスを構築
+                let mut path_buf = std::path::PathBuf::new();
+
+                // ディレクトリを取得
+                if let Some(dir) = file_entry.directory(line_program.header()) {
+                    if let Ok(dir_str) = dwarf.attr_string(unit, dir) {
+                        path_buf.push(dir_str.to_string_lossy().as_ref());
+                    }
+                }
+
+                // ファイル名を追加
+                if let Ok(name_str) = dwarf.attr_string(unit, file_entry.path_name()) {
+                    path_buf.push(name_str.to_string_lossy().as_ref());
+                }
+
+                return Some(path_buf.to_string_lossy().to_string());
+            }
+        }
+
+        None
+    }
+
+    /// ファイル名と行番号からアドレスを検索する
+    ///
+    /// 指定されたファイル名と行番号に該当するアドレスを検索します。
+    /// ファイル名は部分一致で検索されます（例: "main.rs" で "examples/simple_async/src/main.rs" にマッチ）。
+    pub fn find_address_by_file_line(&self, file_pattern: &str, target_line: u32) -> Result<Option<u64>> {
+        let dwarf = self.loader.dwarf();
+        let mut units = dwarf.units();
+
+        while let Some(header) = units.next()? {
+            let unit = dwarf.unit(header)?;
+
+            if let Some(line_program) = unit.line_program.clone() {
+                let mut rows = line_program.rows();
+
+                while let Some((_, row)) = rows.next_row()? {
+                    // 行番号をチェック
+                    if let Some(line) = row.line() {
+                        if line.get() == target_line as u64 {
+                            // ファイル名をチェック
+                            if let Some(file_name) = self.get_file_name(&unit, &row) {
+                                // 部分一致でファイル名を検索（末尾一致も許容）
+                                if file_name.ends_with(file_pattern) || file_name.contains(file_pattern) {
+                                    // is_stmt（ステートメント開始位置）を優先
+                                    if row.is_stmt() {
+                                        return Ok(Some(row.address()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 }

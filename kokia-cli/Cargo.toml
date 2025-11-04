@@ -16,5 +16,7 @@ rustyline.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rustc-demangle.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]

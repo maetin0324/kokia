@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use kokia_core::{Command, Debugger, StopReason};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use tracing_subscriber::EnvFilter;
 
 /// Kokia - Rust Async Debugger
 #[derive(Parser)]
@@ -42,6 +43,19 @@ enum DebugCommand {
 }
 
 fn main() -> Result<()> {
+    // tracing subscriberを初期化
+    // 環境変数 RUST_LOG でログレベルを制御可能 (例: RUST_LOG=debug kokia run ./binary)
+    // デフォルトでは info レベル以上のみ表示
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_line_number(true)
+        .with_thread_ids(false)
+        .init();
+
     println!("Kokia - Rust Async Debugger");
     println!("Version 0.1.0");
     println!();
@@ -213,6 +227,40 @@ fn handle_break(debugger: &mut Debugger, loc: &str) -> Result<()> {
         }
 
         return Ok(());
+    }
+
+    // ファイル名:行番号の形式かチェック（例: "main.rs:30"）
+    if let Some(colon_pos) = loc.rfind(':') {
+        let file_part = &loc[..colon_pos];
+        let line_part = &loc[colon_pos + 1..];
+
+        // 行番号部分が数値かチェック
+        if let Ok(line_num) = line_part.parse::<u32>() {
+            // ファイル名と行番号でブレークポイントを設定
+            match debugger.set_breakpoint_by_file_line(file_part, line_num) {
+                Ok(bp_id) => {
+                    // ブレークポイント情報を取得
+                    if let Some(bp) = debugger.breakpoints().find(|b| b.id == bp_id) {
+                        println!("Breakpoint {} set at {}:{}", bp_id, file_part, line_num);
+
+                        // シンボル情報があれば表示
+                        if let Some(symbol) = debugger.reverse_resolve(bp.address) {
+                            println!("  in function: {}", symbol.demangled_name);
+                        }
+
+                        // 完全なファイルパスを表示
+                        if let Some((full_file, actual_line)) = debugger.get_line_info(bp.address) {
+                            println!("  ({}:{})", full_file, actual_line);
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    return Ok(());
+                }
+            }
+        }
     }
 
     // シンボル名として解釈（PIEの場合のみベースアドレスを加算）

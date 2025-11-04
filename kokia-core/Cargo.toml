@@ -12,6 +12,7 @@ kokia-async = { path = "../kokia-async" }
 anyhow.workspace = true
 thiserror.workspace = true
 capstone.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

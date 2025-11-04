@@ -312,6 +312,8 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         discriminant_value: u64,
     ) -> Result<Option<VariantInfo>> {
         let mut entries = unit.entries();
+        let mut candidates = Vec::new();
+        let mut closure_count = 0;
 
         while let Some((_, entry)) = entries.next_dfs()? {
             // enum型を探す
@@ -320,34 +322,61 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
             {
                 if let Some(name) = self.get_entry_name(entry)? {
                     if name.contains("{closure") || name.contains("{async_block") || name.contains("{async_fn") {
+                        closure_count += 1;
+
+                        // ラッパー型（<を含む）をスキップ - これらは実際のジェネレーター状態マシンではない
+                        if name.contains('<') {
+                            eprintln!("DEBUG: find_variant_in_unit: Skipping wrapper type '{}'", name);
+                            continue;
+                        }
+
+                        // 非ラッパー型が見つかった
+                        eprintln!("DEBUG: find_variant_in_unit: Found non-wrapper closure type '{}'", name);
+
+                        // すべての候補を記録（ラッパーでないもののみ）
+                        if name == "{async_block_env#0}" || name == "{closure_env#0}" || name == "{async_fn_env#0}" {
+                            eprintln!("DEBUG: find_variant_in_unit: Found candidate '{}' at offset {:?}", name, entry.offset());
+                            candidates.push((name.clone(), entry.offset()));
+                        }
+
                         // マッチングロジック（get_discriminant_layoutと同じ）
                         let type_prefix = type_name.split("::{{").next().unwrap_or(type_name);
+                        eprintln!("DEBUG: find_variant_in_unit: Checking if '{}' matches type_prefix '{}'", name, type_prefix);
 
                         // パターン1: {async_block_env#0}, {async_fn_env#0} 単独（最優先）
                         if name == "{async_block_env#0}" || name == "{closure_env#0}" || name == "{async_fn_env#0}" {
-                            eprintln!("DEBUG: find_variant_in_unit matched type '{}', extracting variant for discriminant={}", name, discriminant_value);
+                            eprintln!("DEBUG: find_variant_in_unit: Pattern 1 exact match '{}'", name);
                             return self.extract_variant_info(unit, entry, discriminant_value);
                         }
 
-                        // パターン2: トップレベルでmodule pathが一致
-                        let is_toplevel_match = {
-                            if name.starts_with(type_prefix) {
-                                true
-                            } else if let Some(content) = name.strip_prefix("{closure_env#0}<")
-                                        .or_else(|| name.strip_prefix("{async_block_env#0}<"))
-                                        .or_else(|| name.strip_prefix("{async_fn_env#0}<")) {
-                                content.starts_with(type_prefix)
-                            } else {
-                                false
-                            }
-                        };
+                        // パターン2: トップレベルでmodule pathが一致（ラッパーではない型のみ）
+                        let is_toplevel_match = name.starts_with(type_prefix);
 
                         if is_toplevel_match {
                             // variant情報を取得
+                            eprintln!("DEBUG: find_variant_in_unit: Pattern 2 match: '{}' starts with '{}'", name, type_prefix);
                             return self.extract_variant_info(unit, entry, discriminant_value);
                         }
                     }
                 }
+            }
+        }
+
+        // すべての候補を試す
+        eprintln!("DEBUG: find_variant_in_unit: Found {} closure types, {} candidates for '{}'", closure_count, candidates.len(), type_name);
+        for (name, offset) in &candidates {
+            eprintln!("DEBUG: Candidate: '{}' at offset {:?}", name, offset);
+        }
+
+        // 最初の候補を試す
+        if !candidates.is_empty() {
+            let (name, offset) = &candidates[0];
+            eprintln!("DEBUG: Trying first candidate '{}' at offset {:?}", name, offset);
+
+            // オフセットからエントリを取得
+            let mut entries = unit.entries_at_offset(*offset)?;
+            if let Some((_, entry)) = entries.next_dfs()? {
+                return self.extract_variant_info(unit, entry, discriminant_value);
             }
         }
 
@@ -493,12 +522,20 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         unit: &gimli::Unit<R>,
         struct_entry: &gimli::DebuggingInformationEntry<R>,
     ) -> Result<Vec<FieldInfo>> {
-        eprintln!("DEBUG: extract_struct_fields called for entry at offset {:?}", struct_entry.offset());
+        eprintln!("DEBUG: extract_struct_fields called for entry at offset {:?}, tag={:?}",
+                 struct_entry.offset(), struct_entry.tag());
         let mut fields = Vec::new();
+
+        // 構造体名を表示
+        if let Some(name) = self.get_entry_name(struct_entry)? {
+            eprintln!("DEBUG: extract_struct_fields: struct name='{}'", name);
+        }
 
         // 構造体のサブツリーを作成
         let mut tree = unit.entries_tree(Some(struct_entry.offset()))?;
         let root = tree.root()?;
+        eprintln!("DEBUG: extract_struct_fields: created tree, root offset={:?}, tag={:?}",
+                 root.entry().offset(), root.entry().tag());
 
         // 構造体の子要素（フィールド）を走査
         let mut children = root.children();
@@ -506,7 +543,8 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         while let Some(child) = children.next()? {
             child_count += 1;
             let entry = child.entry();
-            eprintln!("DEBUG: Examining struct child #{}: tag={:?}", child_count, entry.tag());
+            eprintln!("DEBUG: Examining struct child #{}: tag={:?}, offset={:?}",
+                     child_count, entry.tag(), entry.offset());
 
             if entry.tag() == gimli::DW_TAG_member {
                 eprintln!("DEBUG: Found DW_TAG_member");

@@ -155,7 +155,7 @@ impl<'a> VariableLocator<'a> {
     }
 
     /// PCを含む関数DIEを探す
-    fn find_function_at_pc<R: Reader>(
+    fn find_function_at_pc<R: Reader<Offset = usize>>(
         &self,
         unit: &gimli::Unit<R>,
         pc: u64,
@@ -164,7 +164,7 @@ impl<'a> VariableLocator<'a> {
     }
 
     /// ローカル変数を列挙する
-    fn enumerate_local_variables<R: Reader>(
+    fn enumerate_local_variables<R: Reader<Offset = usize>>(
         &self,
         unit: &gimli::Unit<R>,
         function_offset: gimli::UnitOffset<R::Offset>,
@@ -192,7 +192,7 @@ impl<'a> VariableLocator<'a> {
     }
 
     /// 変数情報を抽出する
-    fn extract_variable_info<R: Reader>(
+    fn extract_variable_info<R: Reader<Offset = usize>>(
         &self,
         unit: &gimli::Unit<R>,
         entry: &gimli::DebuggingInformationEntry<R>,
@@ -202,9 +202,13 @@ impl<'a> VariableLocator<'a> {
             Some(gimli::AttributeValue::String(s)) => {
                 s.to_string_lossy()?.into_owned()
             }
-            Some(gimli::AttributeValue::DebugStrRef(_)) => {
-                // DebugStrRef の場合は簡易的にスキップ
-                return Ok(None);
+            Some(gimli::AttributeValue::DebugStrRef(offset)) => {
+                // DebugStrRef を適切に処理
+                let dwarf = self.loader.dwarf();
+                match dwarf.string(offset) {
+                    Ok(s) => s.to_string_lossy().into_owned(),
+                    Err(_) => return Ok(None),
+                }
             }
             _ => return Ok(None),
         };
@@ -225,7 +229,7 @@ impl<'a> VariableLocator<'a> {
     }
 
     /// 変数のロケーションを取得
-    fn get_variable_location<R: Reader>(
+    fn get_variable_location<R: Reader<Offset = usize>>(
         &self,
         _unit: &gimli::Unit<R>,
         entry: &gimli::DebuggingInformationEntry<R>,
@@ -267,7 +271,7 @@ impl<'a> VariableLocator<'a> {
     }
 
     /// 型名を取得（簡易実装）
-    fn get_type_name<R: Reader>(
+    fn get_type_name<R: Reader<Offset = usize>>(
         &self,
         unit: &gimli::Unit<R>,
         entry: &gimli::DebuggingInformationEntry<R>,
@@ -286,8 +290,12 @@ impl<'a> VariableLocator<'a> {
                 Some(gimli::AttributeValue::String(s)) => {
                     return Ok(Some(s.to_string_lossy()?.into_owned()));
                 }
-                Some(gimli::AttributeValue::DebugStrRef(_)) => {
-                    // DebugStrRef の場合は基本型のチェックにフォールスルー
+                Some(gimli::AttributeValue::DebugStrRef(offset)) => {
+                    // DebugStrRef を適切に処理
+                    let dwarf = self.loader.dwarf();
+                    if let Ok(s) = dwarf.string(offset) {
+                        return Ok(Some(s.to_string_lossy().into_owned()));
+                    }
                 }
                 _ => {}
             }
@@ -302,7 +310,7 @@ impl<'a> VariableLocator<'a> {
     }
 
     /// 基本型の名前を推測
-    fn infer_base_type_name<R: Reader>(
+    fn infer_base_type_name<R: Reader<Offset = usize>>(
         &self,
         entry: &gimli::DebuggingInformationEntry<R>,
     ) -> Result<String> {
@@ -403,9 +411,13 @@ impl<'a> VariableLocator<'a> {
             Some(gimli::AttributeValue::String(s)) => {
                 s.to_string_lossy()?.into_owned()
             }
-            Some(gimli::AttributeValue::DebugStrRef(_)) => {
-                // DebugStrRef の場合は簡易的にスキップ
-                return Ok(None);
+            Some(gimli::AttributeValue::DebugStrRef(offset)) => {
+                // DebugStrRef を適切に処理
+                let dwarf = self.loader.dwarf();
+                match dwarf.string(offset) {
+                    Ok(s) => s.to_string_lossy().into_owned(),
+                    Err(_) => return Ok(None),
+                }
             }
             _ => return Ok(None),
         };

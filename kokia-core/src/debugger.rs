@@ -6,6 +6,7 @@ use kokia_dwarf::{DwarfLoader, LineInfoProvider, Symbol, SymbolResolver};
 use kokia_target::{Memory, Process, Registers, StopReason};
 use std::path::Path;
 use std::collections::HashSet;
+use tracing::{debug, warn};
 
 /// スタックフレーム情報
 #[derive(Debug, Clone)]
@@ -333,7 +334,7 @@ impl Debugger {
                     breakpoint_ids.push(bp_id);
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to set breakpoint on {}: {}", symbol.name, e);
+                    warn!("Failed to set breakpoint on {}: {}", symbol.name, e);
                 }
             }
         }
@@ -375,12 +376,12 @@ impl Debugger {
                             memory,
                             BreakpointType::AsyncExit,
                         ) {
-                            eprintln!("Warning: Failed to set exit breakpoint at 0x{:x}: {}", actual_ret_addr, e);
+                            warn!("Failed to set exit breakpoint at 0x{:x}: {}", actual_ret_addr, e);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to disassemble function {}: {}", symbol_name, e);
+                    warn!("Failed to disassemble function {}: {}", symbol_name, e);
                 }
             }
         }
@@ -437,6 +438,29 @@ impl Debugger {
         let memory = self.memory.as_ref()
             .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
         self.breakpoint_manager.add_and_enable(actual_address, memory)
+    }
+
+    /// ファイル名と行番号からブレークポイントを設定する
+    ///
+    /// DWARF行番号情報を使って、指定されたファイルの行番号にブレークポイントを設定します。
+    /// ファイル名は部分一致で検索されます（例: "main.rs" で "examples/simple_async/src/main.rs" にマッチ）。
+    pub fn set_breakpoint_by_file_line(&mut self, file_pattern: &str, line: u32) -> Result<BreakpointId> {
+        let loader = self.dwarf_loader.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("DWARF information not loaded"))?;
+
+        let line_provider = kokia_dwarf::LineInfoProvider::new(loader);
+
+        // ファイル名と行番号からアドレスを検索
+        let address = line_provider.find_address_by_file_line(file_pattern, line)?
+            .ok_or_else(|| anyhow::anyhow!("No matching line found for '{}:{}'", file_pattern, line))?;
+
+        // オフセットアドレスを実行時アドレスに変換
+        let runtime_address = self.offset_to_runtime_addr(address)?;
+
+        // ブレークポイントを設定
+        let memory = self.memory.as_ref()
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
+        self.breakpoint_manager.add_and_enable(runtime_address, memory)
     }
 
     /// ブレークポイントを削除する
@@ -553,7 +577,7 @@ impl Debugger {
             function_name,
             source_location,
         ) {
-            eprintln!("Warning: Failed to track async entry: {}", e);
+            warn!("Failed to track async entry: {}", e);
         }
 
         Ok(())
@@ -618,7 +642,7 @@ impl Debugger {
 
         // AsyncTrackerのon_poll_exitを呼び出す
         if let Err(e) = self.async_tracker.on_poll_exit(tid, _pc, is_ready) {
-            eprintln!("Warning: Failed to track async exit: {}", e);
+            warn!("Failed to track async exit: {}", e);
         }
 
         Ok(())
@@ -891,7 +915,7 @@ impl Debugger {
             match memory.read(func_start as usize, func_size as usize) {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    eprintln!("Warning: Failed to read function bytes at 0x{:x}: {}", func_start, e);
+                    warn!("Failed to read function bytes at 0x{:x}: {}", func_start, e);
                     return Ok(());
                 }
             }
@@ -901,7 +925,7 @@ impl Debugger {
         let ret_addresses = match crate::disasm::find_ret_instructions(&func_bytes, func_start) {
             Ok(addrs) => addrs,
             Err(e) => {
-                eprintln!("Warning: Failed to disassemble function at 0x{:x}: {}", func_start, e);
+                warn!("Failed to disassemble function at 0x{:x}: {}", func_start, e);
                 return Ok(());
             }
         };
@@ -917,7 +941,7 @@ impl Debugger {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to set exit breakpoint at 0x{:x}: {}", ret_addr, e);
+                    warn!("Failed to set exit breakpoint at 0x{:x}: {}", ret_addr, e);
                 }
             }
         }
@@ -942,7 +966,7 @@ impl Debugger {
     pub fn read_discriminant(&self, task_ptr: u64, function_name: Option<&str>) -> Option<u64> {
         let memory = self.memory.as_ref()?;
 
-        eprintln!("DEBUG: read_discriminant for task_ptr=0x{:x}, function_name={:?}", task_ptr, function_name);
+        debug!("read_discriminant for task_ptr=0x{:x}, function_name={:?}", task_ptr, function_name);
 
         // 関数名が提供された場合、DWARFからdiscriminantレイアウトを取得
         if let Some(func_name) = function_name {
@@ -951,32 +975,32 @@ impl Debugger {
 
                 let analyzer = GeneratorLayoutAnalyzer::new(dwarf_loader.dwarf());
                 if let Ok(Some(layout)) = analyzer.get_discriminant_layout(func_name) {
-                    eprintln!("DEBUG: Found discriminant layout: offset={}, size={}", layout.offset, layout.size);
+                    debug!("Found discriminant layout: offset={}, size={}", layout.offset, layout.size);
                     // レイアウト情報に基づいて読み取り
                     let addr = (task_ptr + layout.offset) as usize;
 
                     match layout.size {
                         1 => {
                             if let Ok(val) = memory.read_u8(addr) {
-                                eprintln!("DEBUG: Read discriminant u8: {}", val);
+                                debug!("Read discriminant u8: {}", val);
                                 return Some(val as u64);
                             }
                         }
                         2 => {
                             if let Ok(val) = memory.read_u16(addr) {
-                                eprintln!("DEBUG: Read discriminant u16: {}", val);
+                                debug!("Read discriminant u16: {}", val);
                                 return Some(val as u64);
                             }
                         }
                         4 => {
                             if let Ok(val) = memory.read_u32(addr) {
-                                eprintln!("DEBUG: Read discriminant u32: {}", val);
+                                debug!("Read discriminant u32: {}", val);
                                 return Some(val as u64);
                             }
                         }
                         8 => {
                             if let Ok(val) = memory.read_u64(addr) {
-                                eprintln!("DEBUG: Read discriminant u64: {}", val);
+                                debug!("Read discriminant u64: {}", val);
                                 return Some(val);
                             }
                         }
@@ -1159,7 +1183,7 @@ impl Debugger {
                 result_variables = vars;
             }
             Err(e) => {
-                eprintln!("Warning: DWARF variable extraction failed: {}", e);
+                warn!("DWARF variable extraction failed: {}", e);
             }
         }
 
