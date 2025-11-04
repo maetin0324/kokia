@@ -936,7 +936,7 @@ impl Debugger {
                 Ok(_bp_id) => {
                     // BPが配置されたことをログ出力
                     if let Some(sym) = self.reverse_resolve(ret_addr) {
-                        eprintln!("Async exit breakpoint set at {}+{:#x} (0x{:x})",
+                        debug!("Async exit breakpoint set at {}+{:#x} (0x{:x})",
                                  sym.demangled_name, ret_addr - sym.address, ret_addr);
                     }
                 }
@@ -1193,16 +1193,16 @@ impl Debugger {
 
             // Discriminantを読み取る
             let discriminant = self.read_discriminant(self_ptr, Some(&type_name)).unwrap_or(0);
-            eprintln!("DEBUG: Generator discriminant = {}", discriminant);
+            debug!("Generator discriminant = {}", discriminant);
 
             let analyzer = GeneratorLayoutAnalyzer::new(loader.dwarf());
 
-            eprintln!("DEBUG: Looking for generator variant with func_name='{}' and discriminant={}", type_name, discriminant);
+            debug!("Looking for generator variant with func_name='{}' and discriminant={}", type_name, discriminant);
 
             let mut generator_variables = Vec::new();
             match analyzer.get_variant_info(&type_name, discriminant) {
                 Ok(Some(variant_info)) => {
-                    eprintln!("DEBUG: Generator found {} fields", variant_info.fields.len());
+                    debug!("Generator found {} fields", variant_info.fields.len());
                     for field in variant_info.fields {
                         let addr = self_ptr + field.offset;
 
@@ -1229,10 +1229,10 @@ impl Debugger {
                     }
                 }
                 Ok(None) => {
-                    eprintln!("DEBUG: No variant info found for discriminant {}", discriminant);
+                    debug!("No variant info found for discriminant {}", discriminant);
                 }
                 Err(e) => {
-                    eprintln!("DEBUG: Generator layout analysis failed: {}", e);
+                    debug!("Generator layout analysis failed: {}", e);
                 }
             }
 
@@ -1260,9 +1260,9 @@ impl Debugger {
             }
         }
 
-        eprintln!("DEBUG: Total {} variables found", result_variables.len());
+        debug!("Total {} variables found", result_variables.len());
         for var in &result_variables {
-            eprintln!("  - {} : {} = {:?}", var.name, var.type_name, var.value);
+            debug!("  - {} : {} = {:?}", var.name, var.type_name, var.value);
         }
 
         Ok(result_variables)

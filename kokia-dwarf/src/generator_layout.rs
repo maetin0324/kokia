@@ -2,6 +2,7 @@
 
 use crate::Result;
 use gimli::Reader;
+use tracing::debug;
 
 /// Discriminant情報
 #[derive(Debug, Clone)]
@@ -30,21 +31,21 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
     /// # Returns
     /// Discriminant情報、見つからない場合はNone
     pub fn get_discriminant_layout(&self, type_name: &str) -> Result<Option<DiscriminantLayout>> {
-        eprintln!("DEBUG: get_discriminant_layout for type_name='{}'", type_name);
+        debug!("get_discriminant_layout for type_name='{}'", type_name);
         // DWARFからgenerator enum型を検索
         let mut iter = self.dwarf.units();
         while let Some(header) = iter.next()? {
             let unit = self.dwarf.unit(header)?;
 
             if let Some(layout) = self.find_discriminant_in_unit(&unit, type_name)? {
-                eprintln!("DEBUG: Found discriminant in DWARF: offset={}, size={}", layout.offset, layout.size);
+                debug!("Found discriminant in DWARF: offset={}, size={}", layout.offset, layout.size);
                 return Ok(Some(layout));
             }
         }
 
         // 見つからなかった場合、デフォルトの配置を返す
         // Rustのenum discriminantは通常、構造体の先頭（offset 0）にu32として配置される
-        eprintln!("DEBUG: Discriminant not found in DWARF, using default (offset=0, size=4)");
+        debug!("Discriminant not found in DWARF, using default (offset=0, size=4)");
         Ok(Some(DiscriminantLayout {
             offset: 0,
             size: 4,
@@ -86,7 +87,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                     if name.contains("{closure") || name.contains("{async_block") || name.contains("{async_fn") {
                         closure_types_found += 1;
                         if closure_types_found <= 10 {
-                            eprintln!("DEBUG: Found closure type in DWARF: '{}'", name);
+                            debug!("Found closure type in DWARF: '{}'", name);
                         }
 
                         // マッチングロジック：
@@ -102,7 +103,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
 
                         // パターン1: {async_block_env#0}, {async_fn_env#0} 単独（最優先）
                         if name == "{async_block_env#0}" || name == "{closure_env#0}" || name == "{async_fn_env#0}" {
-                            eprintln!("DEBUG: Matched generator state machine: '{}' with '{}'",
+                            debug!("Matched generator state machine: '{}' with '{}'",
                                 name, type_name);
                             // discriminantフィールドを探す
                             return self.find_discriminant_field(unit, entry);
@@ -122,7 +123,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                         };
 
                         if is_toplevel_match {
-                            eprintln!("DEBUG: Matched closure wrapper (toplevel): '{}' with '{}'",
+                            debug!("Matched closure wrapper (toplevel): '{}' with '{}'",
                                 name, type_name);
                             // discriminantフィールドを探す
                             return self.find_discriminant_field(unit, entry);
