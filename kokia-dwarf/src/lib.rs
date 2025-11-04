@@ -7,11 +7,13 @@ pub mod loader;
 pub mod symbols;
 pub mod lines;
 pub mod variables;
+pub mod utils;
 
 pub use loader::DwarfLoader;
 pub use symbols::{Symbol, SymbolResolver};
 pub use lines::{LineInfo, LineInfoProvider};
-pub use variables::{LocalVariable, Variable, VariableLocator, VariableValue};
+pub use variables::{LocalVariable, Variable, VariableLocator, VariableLocation, VariableValue};
+pub use utils::FunctionFinder;
 
 /// DWARF解析の結果型
 pub type Result<T> = anyhow::Result<T>;

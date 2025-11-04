@@ -7,6 +7,8 @@ pub mod debugger;
 pub mod breakpoint;
 pub mod command;
 pub mod disasm;
+pub mod errors;
+pub mod parse;
 
 pub use debugger::{Debugger, StackFrame};
 pub use breakpoint::{Breakpoint, BreakpointId, BreakpointType};

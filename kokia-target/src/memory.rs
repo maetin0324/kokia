@@ -5,6 +5,75 @@ use nix::unistd::Pid;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read as _, Seek, SeekFrom, Write as _};
 
+/// メモリから読み取り可能な型
+pub trait MemoryReadable: Sized {
+    /// バイト配列から値を構築
+    fn from_le_bytes(bytes: &[u8]) -> Result<Self>;
+
+    /// リトルエンディアンバイト配列に変換
+    fn to_le_bytes(&self) -> Vec<u8>;
+
+    /// 型のサイズ（バイト数）
+    fn size() -> usize;
+}
+
+impl MemoryReadable for u64 {
+    fn from_le_bytes(bytes: &[u8]) -> Result<Self> {
+        let array: [u8; 8] = bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to convert {} bytes to u64 array (expected 8 bytes)", bytes.len()))?;
+        Ok(u64::from_le_bytes(array))
+    }
+
+    fn to_le_bytes(&self) -> Vec<u8> {
+        (*self).to_le_bytes().to_vec()
+    }
+
+    fn size() -> usize { 8 }
+}
+
+impl MemoryReadable for u32 {
+    fn from_le_bytes(bytes: &[u8]) -> Result<Self> {
+        let array: [u8; 4] = bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to convert {} bytes to u32 array (expected 4 bytes)", bytes.len()))?;
+        Ok(u32::from_le_bytes(array))
+    }
+
+    fn to_le_bytes(&self) -> Vec<u8> {
+        (*self).to_le_bytes().to_vec()
+    }
+
+    fn size() -> usize { 4 }
+}
+
+impl MemoryReadable for u16 {
+    fn from_le_bytes(bytes: &[u8]) -> Result<Self> {
+        let array: [u8; 2] = bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to convert {} bytes to u16 array (expected 2 bytes)", bytes.len()))?;
+        Ok(u16::from_le_bytes(array))
+    }
+
+    fn to_le_bytes(&self) -> Vec<u8> {
+        (*self).to_le_bytes().to_vec()
+    }
+
+    fn size() -> usize { 2 }
+}
+
+impl MemoryReadable for u8 {
+    fn from_le_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Err(anyhow::anyhow!("Cannot read u8 from empty bytes"));
+        }
+        Ok(bytes[0])
+    }
+
+    fn to_le_bytes(&self) -> Vec<u8> {
+        vec![*self]
+    }
+
+    fn size() -> usize { 1 }
+}
+
 /// メモリマッピング情報
 #[derive(Debug, Clone)]
 pub struct MemoryMapping {
@@ -93,43 +162,61 @@ impl Memory {
         Ok(())
     }
 
+    /// 型付き値を読み取る（ジェネリック版）
+    ///
+    /// # Examples
+    /// ```ignore
+    /// let value: u64 = memory.read_typed(addr)?;
+    /// let value: u32 = memory.read_typed(addr)?;
+    /// ```
+    pub fn read_typed<T: MemoryReadable>(&self, addr: usize) -> Result<T> {
+        let bytes = self.read(addr, T::size())?;
+        T::from_le_bytes(&bytes)
+    }
+
+    /// 型付き値を書き込む（ジェネリック版）
+    pub fn write_typed<T: MemoryReadable>(&self, addr: usize, value: &T) -> Result<()> {
+        self.write(addr, &value.to_le_bytes())
+    }
+
     /// u64値を読み取る（リトルエンディアン）
     pub fn read_u64(&self, addr: usize) -> Result<u64> {
-        let bytes = self.read(addr, 8)?;
-        let len = bytes.len();
-        let array: [u8; 8] = bytes.try_into()
-            .map_err(|_| anyhow::anyhow!("Failed to convert {} bytes to u64 array (expected 8 bytes)", len))?;
-        Ok(u64::from_le_bytes(array))
+        self.read_typed(addr)
     }
 
     /// u64値を書き込む（リトルエンディアン）
     pub fn write_u64(&self, addr: usize, value: u64) -> Result<()> {
-        self.write(addr, &value.to_le_bytes())
+        self.write_typed(addr, &value)
     }
 
     /// u32値を読み取る（リトルエンディアン）
     pub fn read_u32(&self, addr: usize) -> Result<u32> {
-        let bytes = self.read(addr, 4)?;
-        let len = bytes.len();
-        let array: [u8; 4] = bytes.try_into()
-            .map_err(|_| anyhow::anyhow!("Failed to convert {} bytes to u32 array (expected 4 bytes)", len))?;
-        Ok(u32::from_le_bytes(array))
+        self.read_typed(addr)
     }
 
     /// u32値を書き込む（リトルエンディアン）
     pub fn write_u32(&self, addr: usize, value: u32) -> Result<()> {
-        self.write(addr, &value.to_le_bytes())
+        self.write_typed(addr, &value)
+    }
+
+    /// u16値を読み取る（リトルエンディアン）
+    pub fn read_u16(&self, addr: usize) -> Result<u16> {
+        self.read_typed(addr)
+    }
+
+    /// u16値を書き込む（リトルエンディアン）
+    pub fn write_u16(&self, addr: usize, value: u16) -> Result<()> {
+        self.write_typed(addr, &value)
     }
 
     /// u8値を読み取る
     pub fn read_u8(&self, addr: usize) -> Result<u8> {
-        let bytes = self.read(addr, 1)?;
-        Ok(bytes[0])
+        self.read_typed(addr)
     }
 
     /// u8値を書き込む
     pub fn write_u8(&self, addr: usize, value: u8) -> Result<()> {
-        self.write(addr, &[value])
+        self.write_typed(addr, &value)
     }
 
     /// /proc/pid/maps を解析してメモリマッピング情報を取得する

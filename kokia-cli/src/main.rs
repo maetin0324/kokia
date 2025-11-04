@@ -174,6 +174,7 @@ fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
         Some(Command::Continue) => handle_continue(debugger)?,
         Some(Command::Step) => handle_step(debugger)?,
         Some(Command::Backtrace) => handle_backtrace(debugger)?,
+        Some(Command::Locals) => handle_locals(debugger)?,
         Some(Command::AsyncBacktrace) => handle_async_backtrace(debugger)?,
         Some(Command::AsyncTasks) => handle_async_tasks(debugger)?,
         Some(Command::AsyncEdges) => handle_async_edges(debugger)?,
@@ -193,22 +194,22 @@ fn handle_quit() {
 
 /// Breakコマンドを処理する
 fn handle_break(debugger: &mut Debugger, loc: &str) -> Result<()> {
-    // まず16進数アドレスとして解釈を試みる
-    if loc.starts_with("0x") || loc.chars().all(|c| c.is_ascii_hexdigit()) {
-        if let Ok(addr) = u64::from_str_radix(&loc.trim_start_matches("0x"), 16) {
-            let bp_id = debugger.set_breakpoint(addr)?;
-            println!("Breakpoint {} set at 0x{:x}", bp_id, addr);
+    use kokia_core::parse::parse_address;
 
-            // シンボル情報があれば表示（デマングル済み）
-            if let Some(symbol) = debugger.reverse_resolve(addr) {
-                println!("  at {}", symbol.demangled_name);
-                if let Some((file, line)) = debugger.get_line_info(addr) {
-                    println!("     ({}:{})", file, line);
-                }
+    // まずアドレスとして解釈を試みる
+    if let Ok(addr) = parse_address(loc) {
+        let bp_id = debugger.set_breakpoint(addr)?;
+        println!("Breakpoint {} set at 0x{:x}", bp_id, addr);
+
+        // シンボル情報があれば表示（デマングル済み）
+        if let Some(symbol) = debugger.reverse_resolve(addr) {
+            println!("  at {}", symbol.demangled_name);
+            if let Some((file, line)) = debugger.get_line_info(addr) {
+                println!("     ({}:{})", file, line);
             }
-
-            return Ok(());
         }
+
+        return Ok(());
     }
 
     // シンボル名として解釈（PIEの場合のみベースアドレスを加算）
@@ -363,6 +364,58 @@ fn handle_backtrace(debugger: &mut Debugger) -> Result<()> {
     Ok(())
 }
 
+/// Localsコマンドを処理する
+fn handle_locals(debugger: &mut Debugger) -> Result<()> {
+    use kokia_dwarf::VariableLocation;
+
+    match debugger.get_local_variables() {
+        Ok(variables) => {
+            if variables.is_empty() {
+                println!("No local variables found");
+                println!("Note: Variables may be optimized out. Try compiling with -C opt-level=0");
+                return Ok(());
+            }
+
+            println!("Local variables:");
+            for var in &variables {
+                print!("  {} : {}", var.name, var.type_name);
+
+                // 値を表示
+                if let Some(ref value) = var.value {
+                    print!(" = {}", value);
+                } else {
+                    print!(" = <unavailable>");
+                }
+
+                // ロケーション情報（デバッグ用）
+                match &var.location {
+                    VariableLocation::FrameOffset(offset) => {
+                        println!("  (rbp{:+})", offset);
+                    }
+                    VariableLocation::Address(addr) => {
+                        println!("  (@0x{:x})", addr);
+                    }
+                    VariableLocation::Register(reg) => {
+                        println!("  (reg{})", reg);
+                    }
+                    VariableLocation::OptimizedOut => {
+                        println!("  (optimized out)");
+                    }
+                    VariableLocation::Unknown => {
+                        println!();
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("Failed to get local variables: {}", e);
+            println!("Ensure the binary was compiled with debug info (-C debuginfo=2)");
+        }
+    }
+
+    Ok(())
+}
+
 /// タスク情報を整形して表示するヘルパー関数
 ///
 /// # Arguments
@@ -493,6 +546,83 @@ fn handle_async_edges(debugger: &mut Debugger) -> Result<()> {
     Ok(())
 }
 
+/// AsyncLocalsコマンドを処理する
+fn handle_async_locals(debugger: &mut Debugger, cmd: &str) -> Result<()> {
+    use kokia_dwarf::VariableLocation;
+
+    // TaskIDをパース（"locals <TaskId>" の形式）
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.len() < 2 {
+        // TaskIDが指定されていない場合は、現在のタスク一覧を表示
+        println!("Usage: async locals <TaskId>");
+        println!();
+        println!("Available tasks:");
+        let tasks: Vec<_> = debugger.async_tracker().all_tasks().into_iter().collect();
+        if tasks.is_empty() {
+            println!("  (none - use 'async tasks' to see all tracked tasks)");
+        } else {
+            for task in tasks {
+                println!("  Task {:#x} ({})",
+                    task.id,
+                    task.type_name.as_deref().unwrap_or("<unknown>"));
+            }
+        }
+        return Ok(());
+    }
+
+    let task_id_str = parts[1];
+    let task_id = kokia_core::parse::parse_address(task_id_str)
+        .map_err(|e| anyhow::anyhow!("Invalid TaskId: {}", e))?;
+
+    // Async local variablesを取得
+    match debugger.get_async_local_variables(task_id) {
+        Ok(variables) => {
+            if variables.is_empty() {
+                println!("No local variables found for task {:#x}", task_id);
+                println!("Note: Variables may be optimized out. Try compiling with -C opt-level=0");
+                return Ok(());
+            }
+
+            println!("Local variables for task {:#x}:", task_id);
+            for var in &variables {
+                print!("  {} : {}", var.name, var.type_name);
+
+                if let Some(ref value) = var.value {
+                    print!(" = {}", value);
+                } else {
+                    print!(" = <no value>");
+                }
+
+                // ロケーション情報も表示（デバッグ用）
+                match &var.location {
+                    VariableLocation::FrameOffset(offset) => {
+                        println!("  (rbp{:+})", offset);
+                    }
+                    VariableLocation::Register(reg) => {
+                        println!("  (reg {})", reg);
+                    }
+                    VariableLocation::Address(addr) => {
+                        println!("  (@{:#x})", addr);
+                    }
+                    VariableLocation::OptimizedOut => {
+                        println!("  (optimized out)");
+                    }
+                    VariableLocation::Unknown => {
+                        println!();
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("Failed to get async local variables: {}", e);
+            println!("Ensure the binary was compiled with debug info (-C debuginfo=2)");
+            println!("Hint: Use 'async tasks' to see all available task IDs");
+        }
+    }
+
+    Ok(())
+}
+
 /// AsyncEnableコマンドを処理する
 fn handle_async_enable(debugger: &mut Debugger) -> Result<()> {
     println!("Enabling async task tracking (runtime-independent mode)...");
@@ -568,6 +698,8 @@ fn handle_async_command(debugger: &mut Debugger, cmd: &str) -> Result<()> {
     if cmd == "list" || cmd == "ls" {
         let async_symbols = debugger.find_async_symbols();
         print_symbol_list("Async-related symbols", &async_symbols, None);
+    } else if cmd.starts_with("locals") {
+        handle_async_locals(debugger, cmd)?;
     } else {
         println!("Unknown async command: {}", cmd);
     }
@@ -585,6 +717,7 @@ fn print_help() {
     println!("  continue (c)   - Continue execution");
     println!("  step (s)       - Execute one instruction (step into)");
     println!("  backtrace (bt) - Show stack backtrace");
+    println!("  locals (l)     - Show local variables");
     println!("  find <pattern> - Find symbols matching pattern");
     println!();
     println!("Async commands:");
@@ -593,6 +726,7 @@ fn print_help() {
     println!("  async bt       - Show async backtrace (logical stack)");
     println!("  async tasks    - Show all tracked async tasks");
     println!("  async edges    - Show async task parent-child relationships");
+    println!("  async locals <TaskId> - Show local variables for an async task");
     println!();
     println!("Examples:");
     println!("  break main");

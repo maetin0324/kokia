@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 kokia-core = { path = "../kokia-core" }
+kokia-dwarf = { path = "../kokia-dwarf" }
 rustyline.workspace = true
 anyhow.workspace = true
 clap.workspace = true

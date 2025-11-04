@@ -1,6 +1,6 @@
 //! デバッガのメインロジック
 
-use crate::{breakpoint::BreakpointManager, Breakpoint, BreakpointId, Result};
+use crate::{breakpoint::BreakpointManager, errors, Breakpoint, BreakpointId, Result};
 use kokia_async::AsyncTracker;
 use kokia_dwarf::{DwarfLoader, LineInfoProvider, Symbol, SymbolResolver};
 use kokia_target::{Memory, Process, Registers, StopReason};
@@ -67,14 +67,14 @@ impl Debugger {
     fn require_registers(&self) -> Result<&Registers> {
         self.registers
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))
     }
 
     /// プロセスにアタッチされているか確認し、Memoryへの参照を取得
     fn require_memory(&self) -> Result<&Memory> {
         self.memory
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))
     }
 
     /// 実行時アドレスをファイルオフセットに変換する（PIE対応）
@@ -83,7 +83,7 @@ impl Debugger {
     /// 非PIEの場合、アドレスをそのまま返します。
     fn runtime_addr_to_offset(&self, addr: u64) -> Result<u64> {
         let resolver = self.symbol_resolver.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("DWARF information not loaded"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_DWARF_NOT_LOADED))?;
 
         if resolver.is_pie() {
             let memory = self.require_memory()?;
@@ -100,7 +100,7 @@ impl Debugger {
     /// 非PIEの場合、オフセットをそのまま返します。
     fn offset_to_runtime_addr(&self, offset: u64) -> Result<u64> {
         let resolver = self.symbol_resolver.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("DWARF information not loaded"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_DWARF_NOT_LOADED))?;
 
         if resolver.is_pie() {
             let memory = self.require_memory()?;
@@ -249,57 +249,8 @@ impl Debugger {
     /// - 標準ライブラリ（std::, core::, alloc::）は除外
     /// - 依存ライブラリ（parking_lot, hashbrown等）は除外
     fn is_user_async_closure(name: &str) -> bool {
-        // closure シンボルかチェック
-        if !name.contains("{{closure}}") {
-            return false;
-        }
-
-        // {{constant}}などの特殊closureを除外
-        if name.contains("{{constant}}") {
-            return false;
-        }
-
-        // ランタイム内部を除外
-        if name.starts_with("tokio::")
-            || name.starts_with("async_std::")
-            || name.starts_with("futures::")
-            || name.starts_with("mio::")
-            || name.contains("::runtime::")
-            || name.contains("::executor::")
-            || name.contains("::task::")
-        {
-            return false;
-        }
-
-        // 標準ライブラリを除外
-        if name.starts_with("std::") || name.starts_with("core::") || name.starts_with("alloc::")
-        {
-            return false;
-        }
-
-        // よく使われる依存ライブラリを除外
-        if name.starts_with("parking_lot")
-            || name.starts_with("hashbrown::")
-            || name.starts_with("tracing::")
-            || name.starts_with("serde::")
-            || name.starts_with("log::")
-            || name.starts_with("bytes::")
-            || name.starts_with("hyper::")
-            || name.starts_with("h2::")
-        {
-            return false;
-        }
-
-        // drop_in_place などのシステム関数を除外
-        if name.contains("drop_in_place")
-            || name.contains("::fmt::")
-            || name.contains("::clone::")
-            || name.contains("::drop::")
-        {
-            return false;
-        }
-
-        true
+        let detector = kokia_async::AsyncDetector::new();
+        detector.is_user_async_closure(name)
     }
 
     /// async関数のclosureを検出する（ランタイム非依存）
@@ -397,7 +348,7 @@ impl Debugger {
 
         // メモリを取得（借用問題を避けるため後で使う）
         let memory = self.memory.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
 
         // 1. Entry用のブレークポイントを設定
         let entry_bp_id = self.breakpoint_manager
@@ -437,7 +388,7 @@ impl Debugger {
     /// ブレークポイントを設定する（アドレス指定）
     pub fn set_breakpoint(&mut self, address: u64) -> Result<BreakpointId> {
         let memory = self.memory.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
         self.breakpoint_manager.add_and_enable(address, memory)
     }
 
@@ -473,14 +424,14 @@ impl Debugger {
 
         let actual_address = self.offset_to_runtime_addr(breakpoint_address)?;
         let memory = self.memory.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
         self.breakpoint_manager.add_and_enable(actual_address, memory)
     }
 
     /// ブレークポイントを削除する
     pub fn remove_breakpoint(&mut self, id: BreakpointId) -> Result<()> {
         let memory = self.memory.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
         self.breakpoint_manager.remove_and_disable(id, memory)
     }
 
@@ -503,9 +454,9 @@ impl Debugger {
     /// ブレークポイントヒット時は、PCを自動的に1バイト戻します（INT3命令の分）。
     pub fn continue_and_wait(&mut self) -> Result<StopReason> {
         let process = self.process.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
         let memory = self.memory.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
 
         // 現在のPCを取得
         let registers = self.require_registers()?;
@@ -646,9 +597,9 @@ impl Debugger {
     /// ブレークポイントヒット時は、PCを自動的に1バイト戻します（INT3命令の分）。
     pub fn step(&mut self) -> Result<StopReason> {
         let process = self.process.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
         let memory = self.memory.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
 
         // 現在のPCを取得
         let registers = self.require_registers()?;
@@ -732,7 +683,7 @@ impl Debugger {
     pub fn backtrace(&self) -> Result<Vec<StackFrame>> {
         let registers = self.require_registers()?;
         let memory = self.memory.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not attached to a process"))?;
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
 
         let mut frames = Vec::new();
 
@@ -893,6 +844,153 @@ impl Debugger {
         }
 
         None
+    }
+
+    /// ローカル変数を取得する
+    ///
+    /// 現在のPCでのローカル変数を取得し、値を読み取ります。
+    pub fn get_local_variables(&self) -> Result<Vec<kokia_dwarf::Variable>> {
+        use kokia_dwarf::VariableLocator;
+
+        let loader = self.dwarf_loader.as_ref()
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_DWARF_NOT_LOADED))?;
+
+        let registers = self.require_registers()?;
+        let memory = self.require_memory()?;
+        let pc = registers.get_pc()?;
+        let rbp = registers.get_rbp()?;
+
+        // PIE対応のアドレス変換
+        let pc_offset = self.runtime_addr_to_offset(pc)?;
+
+        // DWARFから変数情報を取得
+        let locator = VariableLocator::new(loader);
+        let mut variables = locator.get_locals(pc_offset)?;
+
+        // 各変数の値を読み取る
+        for var in &mut variables {
+            var.value = self.read_variable_value(&var.location, rbp, memory, registers).ok();
+        }
+
+        Ok(variables)
+    }
+
+    /// 変数の値を読み取る
+    fn read_variable_value(
+        &self,
+        location: &kokia_dwarf::VariableLocation,
+        rbp: u64,
+        memory: &Memory,
+        _registers: &Registers,
+    ) -> Result<kokia_dwarf::VariableValue> {
+        use kokia_dwarf::{VariableLocation, VariableValue};
+
+        match location {
+            VariableLocation::FrameOffset(offset) => {
+                // フレームベース（RBP）からのオフセット
+                let addr = if *offset < 0 {
+                    rbp.wrapping_sub(offset.unsigned_abs())
+                } else {
+                    rbp.wrapping_add(*offset as u64)
+                };
+
+                // とりあえず64ビット整数として読み取る（型情報は後で対応）
+                match memory.read_u64(addr as usize) {
+                    Ok(val) => Ok(VariableValue::UnsignedInteger(val)),
+                    Err(_) => Ok(VariableValue::Unavailable),
+                }
+            }
+            VariableLocation::Address(addr) => {
+                // 静的アドレス（グローバル変数など）
+                // PIE対応のアドレス変換
+                let runtime_addr = self.offset_to_runtime_addr(*addr)
+                    .unwrap_or(*addr);
+
+                match memory.read_u64(runtime_addr as usize) {
+                    Ok(val) => Ok(VariableValue::Address(val)),
+                    Err(_) => Ok(VariableValue::Unavailable),
+                }
+            }
+            VariableLocation::Register(_reg) => {
+                // レジスタの値（今後実装）
+                Ok(VariableValue::Unavailable)
+            }
+            VariableLocation::OptimizedOut => {
+                Ok(VariableValue::Unavailable)
+            }
+            VariableLocation::Unknown => {
+                Ok(VariableValue::Unavailable)
+            }
+        }
+    }
+
+    /// Async関数（generator）のローカル変数を取得する
+    ///
+    /// # Arguments
+    /// * `task_id` - 対象のTaskID（generatorのselfポインタ）
+    ///
+    /// # Returns
+    /// 変数情報のベクタ
+    pub fn get_async_local_variables(&self, task_id: kokia_async::TaskId) -> Result<Vec<kokia_dwarf::Variable>> {
+        use kokia_async::GeneratorAnalyzer;
+        use kokia_dwarf::{Variable, VariableValue, VariableLocation};
+
+        let loader = self.dwarf_loader.as_ref()
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_DWARF_NOT_LOADED))?;
+
+        let memory = self.require_memory()?;
+
+        // TaskInfoを取得してPCとdiscriminantを取得
+        let task_info = self.async_tracker
+            .task_tracker()
+            .get(task_id)
+            .ok_or_else(|| anyhow::anyhow!("Task not found: {:#x}", task_id))?;
+
+        let pc = task_info.last_rip
+            .ok_or_else(|| anyhow::anyhow!("Task PC not available"))?;
+        let discriminant = task_info.current_discriminant;
+
+        // PIE対応のアドレス変換
+        let pc_offset = self.runtime_addr_to_offset(pc)?;
+
+        // GeneratorAnalyzerを使ってdiscriminant情報を取得
+        let analyzer = GeneratorAnalyzer::new(loader.dwarf());
+
+        let mut variables = Vec::new();
+
+        // まず、discriminantフィールド自体を追加
+        if let Some(discr_val) = discriminant {
+            variables.push(Variable {
+                name: "__state".to_string(),
+                type_name: "u32".to_string(),
+                value: Some(VariableValue::UnsignedInteger(discr_val)),
+                location: VariableLocation::Unknown,
+            });
+        }
+
+        // Active variantのフィールドを取得
+        if let Some(discr_val) = discriminant {
+            let fields = analyzer.get_variant_fields(pc_offset, discr_val)?;
+
+            for field in fields {
+                // generatorのselfポインタ + フィールドオフセットから値を読み取る
+                let field_addr = task_id + field.offset;
+
+                let value = match memory.read_u64(field_addr as usize) {
+                    Ok(val) => Some(VariableValue::UnsignedInteger(val)),
+                    Err(_) => Some(VariableValue::Unavailable),
+                };
+
+                variables.push(Variable {
+                    name: kokia_async::normalize_field_name(&field.name),
+                    type_name: field.type_name.unwrap_or_else(|| "<unknown>".to_string()),
+                    value,
+                    location: VariableLocation::Address(field_addr),
+                });
+            }
+        }
+
+        Ok(variables)
     }
 
     /// OS スタックから async 関数のタスクリストを抽出する

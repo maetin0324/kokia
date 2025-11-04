@@ -39,8 +39,22 @@ async fn compute(x: i32, y: i32) -> i32 {
     sum
 }
 
+async fn heavy() {
+    println!("heavy() called");
+    for i in 0..1000000 {
+        let _ = i * i;
+    }   
+    println!("heavy() completed");
+}
+
+async fn breakpoint() {
+    println!("breakpoint() called");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    println!("breakpoint() completed");
+}
+
 /// メイン関数
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     println!("=== Kokia Simple Async Example ===");
     println!("This program demonstrates async/await for debugging with kokia.");
@@ -48,7 +62,17 @@ async fn main() {
 
     let result = compute(5, 10).await;
 
-    println!();
+    let mut jhs = Vec::new();
+    for _ in 0..4 {
+        let jh = tokio::spawn(async {
+            heavy().await;
+        });
+        jhs.push(jh);
+    }
+    breakpoint().await;
+    for jh in jhs {
+        let _ = jh.await;
+    }
     println!("Final result: {}", result);
     println!("Expected: (5*2) + (10*2) = 10 + 20 = 30");
 }

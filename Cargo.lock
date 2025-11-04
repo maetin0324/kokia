@@ -330,6 +330,7 @@ name = "kokia-async"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gimli",
  "kokia-dwarf",
  "kokia-target",
  "regex",
@@ -344,6 +345,7 @@ dependencies = [
  "anyhow",
  "clap",
  "kokia-core",
+ "kokia-dwarf",
  "rustc-demangle",
  "rustyline",
 ]

@@ -321,3 +321,286 @@ fn on_poll_exit(tid: Tid, regs: &Regs, rip: u64, retval: Option<EnumVal>) -> Res
   3. `async locals` が **停止点の live 変数**を復元、
   4. rr 上の `reverse-next` でも **構造が巻き戻し/再現** できる。
 
+
+# kokia 追加実装計画書：`async fn` のローカル変数キャプチャ
+
+目的：**ランタイム非依存**に、`async fn` の**現在停止点に live なローカル変数**を、通常関数と同等（`locals`）の操作で取得・表示できるようにする。
+方式は **DWARF ロケーション評価**＋**generator（`GenFuture`）レイアウト解析**の二段構え（優先順：DWARF → generator）。
+
+---
+
+## 0. 成果物（P0 受け入れ条件）
+
+* `async locals <TaskId>`：対象 `TaskId`（= generator `self` のアドレス）の**停止点ローカル**を名前・型・値で一覧化。
+* `locals`（通常フレーム）でも DWARF に従って**レジスタ/スタック/メモリ**から復元。
+* 最低限の型表示：整数/浮動/ポインタ/配列/スライス/`&str`/`String`/`Vec<T>`（プレビュー）/構造体/列挙（`Option`/`Result`）/参照/`Box`/`Pin`。
+* 最適化（O0）で正確、O2 で欠損は `optimized-out` と注記。
+
+---
+
+## 1. コンポーネント構成（新規/拡張）
+
+```
+kokia-dwarf/
+  ├─ loader.rs            # ELF/DWARF 読み込み（既存）
+  ├─ loc_eval.rs          # ★DWARF ロケーション式評価（新規強化）
+  ├─ type_tree.rs         # 型木（DIE）→ kokia内表現への解決（拡張）
+  ├─ decode.rs            # ★値デコード（基本型/複合型/標準型プリティプリンタ）
+  └─ cache.rs             # 型/ロケーション/行情報キャッシュ（拡張）
+
+kokia-async/
+  ├─ generator.rs         # ★generator 判別子/variant/フィールド取得
+  ├─ locals.rs            # ★async locals 実装（DWARF優先→generator フォールバック）
+  └─ names.rs             # ★フィールド名の人間可読化（suffix除去/合成）
+
+kokia-target/
+  └─ mem.rs               # process_vm_readv ラッパ、境界・長さ上限（拡張）
+
+kokia-cli/
+  └─ cmds/async_locals.rs # CLI/TUI コマンド/整形出力（新規）
+```
+
+主要依存：`gimli`, `object`, `bitflags`, `smallvec`, `fxhash`, `capstone`（既存）。
+
+---
+
+## 2. 取得戦略（優先度とフォールバック）
+
+### 2.1 優先：DWARF ロケーション評価（「本来の変数名」を得る）
+
+* 入力：**対象フレーム**（`TaskId` の poll 内での RIP）と **関数スコープの変数 DIE**。
+* 手順：
+
+  1. `gimli` で該当コンパイル単位→関数 DIE→子 DIE（`DW_TAG_variable`, `DW_TAG_formal_parameter`）を列挙。
+  2. 現在の `RIP` に対する **`DW_AT_location` / location list** を評価（`loc_eval.rs`）。
+  3. 評価結果は「レジスタ/FP相対/メモリ間接/ピース合成」。必要に応じて `process_vm_readv`。
+  4. 型 DIE を `type_tree.rs` で kokia 型に解決 → `decode.rs` で値整形。
+* 長所：**ソースの変数名**が復元でき、generator の内部名に依らない。
+* 注意：最適化により location が `empty`（= optimized out）の場合がある。
+
+### 2.2 次善：generator レイアウト（variant フィールド直読み）
+
+* 入力：`TaskId=self_ptr`、generator 型の DIE、**active variant**（判別子）。
+* 手順：
+
+  1. `generator.rs`：`GenFuture::poll` の `self` 型 DIE を逆引きし **判別子オフセット/サイズ**を取得→現在 variant を決定。
+  2. variant の **フィールド列 `{name, offset, size, ty}`** を取得。
+  3. 各フィールドを `self_ptr + offset` で読み、`decode.rs` で整形。
+  4. `names.rs` で `__await_3`, `<local>@5`, `.0` などの**実装依存 suffix を除去/正規化**。
+* 長所：**停止点で live な全フィールド**を読みやすい。
+* 注意：名前が実装名になる可能性 → 2.1 の結果と **名称マージ（同値アドレス一致で rename）**。
+
+---
+
+## 3. 値デコード（`decode.rs`）
+
+### 3.1 共通方針
+
+* **深さ制限**と**要素数上限**（既定：深さ 3、配列/Vec 表示 16 要素）で再帰を打ち切り、サマリ表示。
+* **ゼロコピー禁止**：常に `process_vm_readv` で**別プロセスから安全に読み出し**。
+* **サニタイズ**：巨大長さや不正ポインタは途中で切って `…` と表示（上限は設定化）。
+
+### 3.2 プリミティブ
+
+* 整数/浮動/Bool/Char：リトルエンディアンでパース。
+* ポインタ：`0x…` 表示＋`addr2line` でシンボリック（関数ポインタ等）。
+
+### 3.3 参照/スライス/文字列
+
+* `&T`：中身を 1 段だけ展開（深さ制限考慮）。
+* `&[T]`：`{ptr, len}` 読み、`T` を要素上限で配列表示。
+* `&str`：`{ptr, len}` → UTF-8 バリデーション。失敗時は `b"...hex..."`。
+* `String`：`{ptr, len, cap}` 読み、`len` まで文字列化。
+* `OsString/PathBuf`：`Vec<u8>` として読み、表示は `b"...hex..."`（Linuxは UTF-8 想定でも安全重視）。
+
+### 3.4 コレクション
+
+* `Vec<T>`：`{ptr, len, cap}` → 要素上限で `[T; n]` 風プレビュー。
+* `Box<T>`/`Pin<Box<T>>`：内部 `T` を 1 段展開。
+* `Option<T>`/`Result<T,E>`：**DWARF の判別子**で active variant を判断し、その中身を表示。
+* `Rc/Arc`：`ptr` と `strong/weak` カウンタ（実装依存フィールド）は可能なら推測、未対応時は `ptr` のみ。
+
+### 3.5 ユーザ定義構造体/列挙
+
+* 構造体：各フィールドを再帰。
+* 列挙：判別子→ active variant→ フィールド再帰。
+* 循環検出：訪問済み `addr+ty` をセットで記録し `…(cycle)`。
+
+---
+
+## 4. 実装詳細
+
+### 4.1 ロケーション式評価（`loc_eval.rs`）
+
+* 実装：`gimli::Evaluation` を利用し、**必要なレジスタ値/メモリ読取**を `kokia-target` にコールバック。
+* 対応命令：`DW_OP_reg*`, `DW_OP_breg*`, `DW_OP_fbreg`, `DW_OP_piece`, `DW_OP_deref`, `DW_OP_plus_uconst` 等の基本群。
+* 結果型：
+
+  ```rust
+  enum Loc {
+      Reg { reg: u16 },
+      Addr { addr: u64, size: usize },
+      Pieces(Vec<Piece>), // 分割された複合
+      Empty,              // optimized-out
+  }
+  ```
+
+### 4.2 generator メタ（`generator.rs`）
+
+* **判別子の位置**：generator の DIE（variantを伴う擬似 enum）を走査し、
+
+  * `__state` 等の **discriminant フィールド**のオフセット/サイズを抽出。
+* **active variant 特定**：`target.read(self_ptr + off, size)` で現在値を取得。
+* **フィールド列挙**：active variant の `DW_TAG_member` を `Field {name, offset, size, ty}` へ展開。
+
+### 4.3 名前マージ（DWARF 優先）
+
+* 2.1 の**本来の変数名**と 2.2 の**generator フィールド**が**同一アドレス**を指すとき、
+
+  * 表示名は **DWARF 名を優先**、generator 名は `aka <raw>` として補足。
+
+### 4.4 メモリ読取ガード（`kokia-target::mem`）
+
+* `read(addr, len)` は `MAX_LEN_PER_READ` を超えると分割。
+* 総量上限 `MAX_TOTAL_BYTES_PER_CMD` を超えたら途中打ち切りで `…(truncated)`。
+* 読めないアドレスは `invalid-address` と表示。
+
+---
+
+## 5. CLI/TUI 仕様
+
+```
+(kokia) async locals [<TaskId>|--current]
+# 出力例
+name           type                    value
+-------------  ----------------------  ----------------------------
+buf            Vec<u8> (len=64)        [0x12, 0x34, ... 16 more]
+path           PathBuf                 b"/tmp/input.bin"
+bytes_read     usize                   4096
+peer           Option<SocketAddr>      Some(127.0.0.1:8080)
+self           &mut MyState            MyState { phase: Handshake, ... }
+__aka __await_3 <raw>                  &TcpStream(0x7f..)
+```
+
+オプション：
+
+* `--max-depth N`, `--max-elems N`, `--hex`（バイナリは常に hex）
+* `--raw`（generator フィールド名をそのまま出す）
+* `locals`（通常フレーム）は同 UI で動作
+
+---
+
+## 6. テスト（自動）
+
+### 6.1 ユニット
+
+* `decode.rs`：あらゆる型のデコード関数に対し**合成メモリ**で golden テスト。
+* `loc_eval.rs`：DWARF サンプル（固定 ELF）で命令網羅テスト。
+* `generator.rs`：判別子/variant 抽出、フィールド列挙。
+
+### 6.2 結合・例題
+
+* `examples/async_locals`：
+
+  * 停止点 1：`let s = String::from("abc"); let v = vec![1u32,2,3];`
+  * 停止点 2（`await` 後）：`s` 再利用、`v` ドロップ済み → `optimized-out` を検出。
+* `select!/join!/spawn` 複合で、各停止点の live 変数が**期待どおり**に変化。
+
+### 6.3 逆実行（rr）
+
+* `reverse-next` で停止点を戻し、**同じ `async locals` 出力**が再現されること。
+
+---
+
+## 7. パフォーマンス最適化
+
+* **型/ロケーション/行情報キャッシュ**：`(cu_id, die_offset)` キーの LRU。
+* **読み出し coalesce**：同一ページに跨る読みを `readv` で束ねる。
+* **ヒューリスティクス**：`Vec<u8>`/`String` 等は**長さ上限**を小さく（既定 256B）。
+
+---
+
+## 8. 既知の難所と緩和
+
+* **最適化で location 消失** → generator フォールバック＋`optimized-out`表示。
+* **巨大/非整合メモリ** → 上限・タイムアウト・境界チェックで安全に打ち切り。
+* **trait オブジェクト（`dyn Trait`）** → vtable まで表示（型名解決は将来拡張）。
+* **レイアウト変更（rustc 更新）** → CI でツールチェーン固定。将来 `.asyncmap`（独自メタ）導入余地。
+
+---
+
+## 9. 実装スケジュール（P0：2–3 週）
+
+* W1:
+
+  * [ ] `loc_eval.rs` 実装（DWARF 基本命令）
+  * [ ] `decode.rs` 基本型/参照/スライス/文字列
+  * [ ] `generator.rs`（判別子/variant 抽出）
+* W2:
+
+  * [ ] `Vec/Box/Option/Result/Struct/Enum` デコード
+  * [ ] `async locals` 統合（DWARF→generator フォールバック）
+  * [ ] CLI 出力/上限/エラー整備
+* W3:
+
+  * [ ] 例題/結合テスト/rr 逆実行検証
+  * [ ] キャッシュ/性能チューニング
+
+---
+
+## 10. 擬似コード断片
+
+### 10.1 async locals（高位）
+
+```rust
+pub fn async_locals(task: TaskId, ctx: &mut Ctx) -> Vec<VarView> {
+    let rip = ctx.async_state.tasks[&task].last_rip.unwrap();
+    // 1) DWARF から名前付きローカルを復元
+    let mut vars = dwarf_locals_at(rip, ctx).collect::<Vec<_>>();
+    // 2) generator フォールバック（アドレス未出現の領域）
+    let gen_vars = generator_fields(task, ctx);
+    merge_by_address(&mut vars, gen_vars); // 同じaddrならDWARF名優先
+    // 3) デコード＆表示用 View へ
+    vars.into_iter().map(|b| decode_value(b, ctx)).collect()
+}
+```
+
+### 10.2 DWARF ロケーション評価
+
+```rust
+fn eval_loc(die: &DieRef, rip: u64, regs: &Regs, mem: &dyn Mem) -> Loc {
+    let mut eval = die.location_expr().evaluation();
+    let mut res = eval.evaluate_with(|ctx| match ctx {
+        gimli::EvaluationResult::RequiresRegister { register, .. } => {
+            Ok(Value::Generic(regs.get(register)))
+        }
+        gimli::EvaluationResult::RequiresMemory { address, size, .. } => {
+            Ok(Value::Bytes(mem.read(address, size)?))
+        }
+        // ... 他要求に対応
+    })?;
+    loc_from(res)
+}
+```
+
+### 10.3 `&str`/`String` の読取
+
+```rust
+fn read_rust_str(mem: &dyn Mem, ptr: u64, len: usize) -> DisplayVal {
+    let n = len.min(MAX_STR_BYTES);
+    let bytes = mem.read(ptr, n).unwrap_or_default();
+    match std::str::from_utf8(&bytes) {
+        Ok(s) => DisplayVal::Str(s.to_owned(), len, n < len),
+        Err(_) => DisplayVal::Bytes(bytes, len, true),
+    }
+}
+```
+
+---
+
+### 11. ビルド推奨（デバッグ対象側）
+
+* `RUSTFLAGS="-C debuginfo=2 -C force-frame-pointers=yes"`（P0 は `-C opt-level=0` を推奨）
+* LTO 無効、`panic=unwind`、strip 無効
+
+え
