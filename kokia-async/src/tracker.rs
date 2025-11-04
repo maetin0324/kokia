@@ -46,7 +46,17 @@ impl AsyncTracker {
     /// * `parent_task` - フレームスキャンで検出された親タスク（Option）
     /// * `discriminant` - 子タスクの discriminant（停止点インデックス）
     /// * `function_name` - タスクの関数名（デマングル済み）
-    pub fn on_poll_entry(&mut self, tid: Tid, child_self: u64, rip: u64, parent_task: Option<u64>, discriminant: Option<u64>, function_name: Option<String>) -> Result<()> {
+    /// * `source_location` - ソースコード位置 (file, line)
+    pub fn on_poll_entry(
+        &mut self,
+        tid: Tid,
+        child_self: u64,
+        rip: u64,
+        parent_task: Option<u64>,
+        discriminant: Option<u64>,
+        function_name: Option<String>,
+        source_location: Option<(String, u32)>,
+    ) -> Result<()> {
         let child = child_self;
 
         // 1) 親探索（優先: フレームスキャン → スコープスタック）
@@ -75,8 +85,10 @@ impl AsyncTracker {
             self.task_tracker.register(task);
         }
 
-        // TODO: addr2line でソースコード位置を取得
-        let (file, line) = (None, None);
+        // ソースコード位置を取得（addr2line）
+        let (file, line) = source_location
+            .map(|(f, l)| (Some(f), Some(l)))
+            .unwrap_or((None, None));
 
         // 3) エッジ登録（callsite 同定）
         if let Some(parent_id) = parent {

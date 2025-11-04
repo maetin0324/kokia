@@ -41,7 +41,7 @@ async fn compute(x: i32, y: i32) -> i32 {
 
 async fn heavy() {
     println!("heavy() called");
-    for i in 0..1000000 {
+    for i in 0..10000 {
         let _ = i * i;
     }   
     println!("heavy() completed");

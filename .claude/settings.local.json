@@ -10,7 +10,10 @@
       "Bash(cargo test:*)",
       "Bash(./target/release/kokia:*)",
       "WebSearch",
-      "Bash(gdb:*)"
+      "Bash(gdb:*)",
+      "Bash(timeout 3 ./target/debug/simple_async:*)",
+      "Bash(./target/debug/kokia:*)",
+      "Bash(readelf:*)"
     ],
     "deny": [],
     "ask": []

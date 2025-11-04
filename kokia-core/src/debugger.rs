@@ -5,6 +5,7 @@ use kokia_async::AsyncTracker;
 use kokia_dwarf::{DwarfLoader, LineInfoProvider, Symbol, SymbolResolver};
 use kokia_target::{Memory, Process, Registers, StopReason};
 use std::path::Path;
+use std::collections::HashSet;
 
 /// スタックフレーム情報
 #[derive(Debug, Clone)]
@@ -45,6 +46,8 @@ pub struct Debugger {
     async_tracker: AsyncTracker,
     /// ブレークポイント管理
     breakpoint_manager: BreakpointManager,
+    /// exit BP配置済みの関数アドレス（関数開始アドレスで管理）
+    async_exit_bps_installed: HashSet<u64>,
 }
 
 impl Debugger {
@@ -60,6 +63,7 @@ impl Debugger {
             async_tracker: AsyncTracker::new()
                 .expect("Failed to create AsyncTracker"),
             breakpoint_manager: BreakpointManager::new(),
+            async_exit_bps_installed: HashSet::new(),
         }
     }
 
@@ -392,6 +396,13 @@ impl Debugger {
         self.breakpoint_manager.add_and_enable(address, memory)
     }
 
+    /// 型指定付きでブレークポイントを設定する
+    fn set_breakpoint_with_type(&mut self, address: u64, bp_type: crate::breakpoint::BreakpointType) -> Result<BreakpointId> {
+        let memory = self.memory.as_ref()
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_NOT_ATTACHED))?;
+        self.breakpoint_manager.add_and_enable_with_type(address, memory, bp_type)
+    }
+
     /// シンボル名からブレークポイントを設定する
     ///
     /// DWARF行番号情報を使って、関数の最初の有効なソース行にブレークポイントを設定します。
@@ -506,6 +517,9 @@ impl Debugger {
     fn handle_async_entry(&mut self, pc: u64) -> Result<()> {
         use kokia_async::Tid;
 
+        // 初回ヒット時: GenFuture::poll のret命令にexit BPを自動配置
+        self.ensure_async_exit_breakpoints(pc)?;
+
         // 現在のスレッドIDを取得（簡易版：PIDを使用）
         let pid = self.pid().ok_or_else(|| anyhow::anyhow!("No process attached"))?;
         let tid = Tid(pid);
@@ -519,15 +533,26 @@ impl Debugger {
         // バックトレースを取得し、フレーム1以降から最初の async 関数（{{closure}}）を探す
         let parent_task = self.scan_parent_async_function()?;
 
-        // 子タスクの discriminant を読み取る
-        let discriminant = self.read_discriminant(child_self);
-
         // PCから関数名を解決（デマングル済み）
         let function_name = self.reverse_resolve(pc)
             .map(|sym| sym.demangled_name);
 
+        // 子タスクの discriminant を読み取る（関数名を使ってDWARFから正確な位置を取得）
+        let discriminant = self.read_discriminant(child_self, function_name.as_deref());
+
+        // ソースコード位置を取得（addr2line）
+        let source_location = self.get_line_info(pc);
+
         // AsyncTrackerのon_poll_entryを呼び出す
-        if let Err(e) = self.async_tracker.on_poll_entry(tid, child_self, pc, parent_task, discriminant, function_name) {
+        if let Err(e) = self.async_tracker.on_poll_entry(
+            tid,
+            child_self,
+            pc,
+            parent_task,
+            discriminant,
+            function_name,
+            source_location,
+        ) {
             eprintln!("Warning: Failed to track async entry: {}", e);
         }
 
@@ -536,7 +561,7 @@ impl Debugger {
 
     /// 親の async 関数をフレームスキャンで検出する
     ///
-    /// バックトレースからフレーム1以降の最初の async 関数（{{closure}}）を探し、
+    /// バックトレースからフレーム1以降の最初の GenFuture::poll を探し、
     /// その RDI レジスタ値（self ポインタ）を返す
     fn scan_parent_async_function(&self) -> Result<Option<u64>> {
         // バックトレースを取得
@@ -545,9 +570,18 @@ impl Debugger {
         // フレーム1以降を検査（フレーム0は現在の関数）
         for frame in frames.iter().skip(1) {
             if let Some(ref func_name) = frame.function_name {
-                // async 関数かどうかを判定（{{closure}} を含むか）
-                if func_name.contains("{{closure}}") {
-                    // このフレームの saved_rdi を返す
+                // GenFuture::poll または Future::poll を優先的に検出
+                // - core::future::from_generator::GenFuture<...>::poll
+                // - <... as core::future::future::Future>::poll
+                if func_name.contains("GenFuture") && func_name.contains("::poll") {
+                    // GenFuture::poll を見つけた
+                    return Ok(frame.saved_rdi);
+                } else if func_name.contains("Future") && func_name.contains("::poll") {
+                    // Future::poll を見つけた（より一般的）
+                    return Ok(frame.saved_rdi);
+                } else if func_name.contains("{{closure}}") {
+                    // async 関数のクロージャを見つけた（フォールバック）
+                    // GenFuture::pollの場合、RDIはselfポインタを指している
                     return Ok(frame.saved_rdi);
                 }
             }
@@ -823,6 +857,77 @@ impl Debugger {
         None
     }
 
+    /// GenFuture::pollのret命令にexit BPを自動配置する
+    ///
+    /// 初回のentry BPヒット時に、関数内のすべてのret命令を検出し、
+    /// exit BPとして配置します。
+    ///
+    /// # Arguments
+    /// * `entry_pc` - entry BPがヒットしたPC（関数内のアドレス）
+    fn ensure_async_exit_breakpoints(&mut self, entry_pc: u64) -> Result<()> {
+        // PCから関数シンボルを解決
+        let symbol = match self.reverse_resolve(entry_pc) {
+            Some(sym) => sym,
+            None => return Ok(()), // シンボル解決失敗は無視
+        };
+
+        let func_start = symbol.address;
+
+        // すでに配置済みかチェック
+        if self.async_exit_bps_installed.contains(&func_start) {
+            return Ok(());
+        }
+
+        // 関数のサイズを取得
+        let func_size = symbol.size;
+        if func_size == 0 {
+            // サイズ不明の場合はスキップ（将来的にはDWARFから取得）
+            return Ok(());
+        }
+
+        // 関数のバイト列を読み取り
+        let func_bytes = {
+            let memory = self.require_memory()?;
+            match memory.read(func_start as usize, func_size as usize) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read function bytes at 0x{:x}: {}", func_start, e);
+                    return Ok(());
+                }
+            }
+        };
+
+        // ret命令を検出
+        let ret_addresses = match crate::disasm::find_ret_instructions(&func_bytes, func_start) {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                eprintln!("Warning: Failed to disassemble function at 0x{:x}: {}", func_start, e);
+                return Ok(());
+            }
+        };
+
+        // 各ret命令にBPを配置（AsyncExitとして設定）
+        for ret_addr in ret_addresses {
+            match self.set_breakpoint_with_type(ret_addr, crate::breakpoint::BreakpointType::AsyncExit) {
+                Ok(_bp_id) => {
+                    // BPが配置されたことをログ出力
+                    if let Some(sym) = self.reverse_resolve(ret_addr) {
+                        eprintln!("Async exit breakpoint set at {}+{:#x} (0x{:x})",
+                                 sym.demangled_name, ret_addr - sym.address, ret_addr);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to set exit breakpoint at 0x{:x}: {}", ret_addr, e);
+                }
+            }
+        }
+
+        // 配置完了を記録
+        self.async_exit_bps_installed.insert(func_start);
+
+        Ok(())
+    }
+
     /// タスクの discriminant（停止点インデックス）を読み取る
     ///
     /// 生成器オブジェクトのメモリから discriminant 値を読み取ります。
@@ -830,19 +935,75 @@ impl Debugger {
     ///
     /// # Arguments
     /// * `task_ptr` - タスク（生成器）のアドレス
+    /// * `function_name` - 関数名（DWARFから正確な位置を取得するために使用）
     ///
     /// # Returns
     /// discriminant 値（u32）、または読み取り失敗時は None
-    pub fn read_discriminant(&self, task_ptr: u64) -> Option<u64> {
+    pub fn read_discriminant(&self, task_ptr: u64, function_name: Option<&str>) -> Option<u64> {
         let memory = self.memory.as_ref()?;
 
-        // 生成器の discriminant は通常、構造体の先頭に配置される
-        // サイズは u32 または u64 の場合がある
-        // まず u32 として読み取ってみる
+        eprintln!("DEBUG: read_discriminant for task_ptr=0x{:x}, function_name={:?}", task_ptr, function_name);
+
+        // 関数名が提供された場合、DWARFからdiscriminantレイアウトを取得
+        if let Some(func_name) = function_name {
+            if let Some(dwarf_loader) = &self.dwarf_loader {
+                use kokia_dwarf::GeneratorLayoutAnalyzer;
+
+                let analyzer = GeneratorLayoutAnalyzer::new(dwarf_loader.dwarf());
+                if let Ok(Some(layout)) = analyzer.get_discriminant_layout(func_name) {
+                    eprintln!("DEBUG: Found discriminant layout: offset={}, size={}", layout.offset, layout.size);
+                    // レイアウト情報に基づいて読み取り
+                    let addr = (task_ptr + layout.offset) as usize;
+
+                    match layout.size {
+                        1 => {
+                            if let Ok(val) = memory.read_u8(addr) {
+                                eprintln!("DEBUG: Read discriminant u8: {}", val);
+                                return Some(val as u64);
+                            }
+                        }
+                        2 => {
+                            if let Ok(val) = memory.read_u16(addr) {
+                                eprintln!("DEBUG: Read discriminant u16: {}", val);
+                                return Some(val as u64);
+                            }
+                        }
+                        4 => {
+                            if let Ok(val) = memory.read_u32(addr) {
+                                eprintln!("DEBUG: Read discriminant u32: {}", val);
+                                return Some(val as u64);
+                            }
+                        }
+                        8 => {
+                            if let Ok(val) = memory.read_u64(addr) {
+                                eprintln!("DEBUG: Read discriminant u64: {}", val);
+                                return Some(val);
+                            }
+                        }
+                        _ => {
+                            eprintln!("DEBUG: Unsupported discriminant size: {}, trying to read first byte", layout.size);
+                            // 大きなサイズの場合、最初の1バイトまたは4バイトを読む
+                            if let Ok(val) = memory.read_u32(addr) {
+                                eprintln!("DEBUG: Read discriminant (first 4 bytes of {}-byte field): {}", layout.size, val);
+                                return Some(val as u64);
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("DEBUG: No discriminant layout found in DWARF");
+                }
+            }
+        }
+
+        // フォールバック: デフォルトの動作（offset 0, size 4）
+        // 生成器の discriminant は通常、構造体の先頭に u32 として配置される
+        eprintln!("DEBUG: Falling back to default discriminant read (offset=0, size=4)");
         if let Ok(discr) = memory.read_u32(task_ptr as usize) {
+            eprintln!("DEBUG: Read discriminant (fallback) u32: {}", discr);
             return Some(discr as u64);
         }
 
+        eprintln!("DEBUG: Failed to read discriminant");
         None
     }
 
@@ -873,6 +1034,160 @@ impl Debugger {
         }
 
         Ok(variables)
+    }
+
+    /// async タスク（generator）のローカル変数を取得する
+    ///
+    /// # Arguments
+    /// * `task_id` - タスクID（generator self_ptr）
+    ///
+    /// # Returns
+    /// 現在のvariantに属するフィールドのリスト
+    pub fn get_async_locals(&self, task_id: u64) -> Result<Vec<kokia_dwarf::Variable>> {
+        use kokia_dwarf::{GeneratorLayoutAnalyzer, Variable, VariableLocation, VariableValue, VariableLocator};
+
+        let loader = self.dwarf_loader.as_ref()
+            .ok_or_else(|| anyhow::anyhow!(errors::ERR_DWARF_NOT_LOADED))?;
+        let memory = self.require_memory()?;
+
+        // TaskInfoから RIP と型名を取得
+        let task_info = self.async_tracker.get_task(task_id);
+        let rip = task_info.and_then(|task| task.last_rip);
+        let type_name = task_info.and_then(|task| task.type_name.clone());
+
+        eprintln!("DEBUG: get_async_locals for task 0x{:x}", task_id);
+        eprintln!("DEBUG: RIP = {:?}", rip);
+        eprintln!("DEBUG: Type name = {:?}", type_name);
+
+        let mut dwarf_variables = Vec::new();
+
+        // 戦略1: DWARF ロケーション評価（RIPが判明している場合）
+        if let Some(pc) = rip {
+            eprintln!("DEBUG: Attempting DWARF location evaluation at PC 0x{:x}", pc);
+
+            // PIE対応: ランタイムアドレスをオフセットに変換
+            let pc_offset = match self.runtime_addr_to_offset(pc) {
+                Ok(offset) => {
+                    eprintln!("DEBUG: Converted PC 0x{:x} -> offset 0x{:x}", pc, offset);
+                    offset
+                }
+                Err(e) => {
+                    eprintln!("DEBUG: Failed to convert PC to offset: {}", e);
+                    pc // フォールバック: そのまま使用
+                }
+            };
+
+            let locator = VariableLocator::new(loader);
+
+            // レジスタ値取得コールバック（現在はダミー実装）
+            let get_reg = |_reg: u16| -> Result<u64> {
+                // TODO: 実際のレジスタ値を取得する実装
+                // 現時点ではタスクが停止中のため、レジスタ値は不明
+                Err(anyhow::anyhow!("Register values not available for suspended task"))
+            };
+
+            // メモリ読み取りコールバック
+            let read_mem = |addr: u64, size: usize| -> Result<Vec<u8>> {
+                memory.read(addr as usize, size)
+                    .map_err(|e| anyhow::anyhow!("Memory read failed: {}", e))
+            };
+
+            // フレームベース（task_id = self ポインタをフレームベースとして使用）
+            let frame_base = Some(task_id);
+
+            // DWARFロケーション評価を実行（オフセットアドレスを使用）
+            match locator.get_locals_with_values(pc_offset, frame_base, get_reg, read_mem) {
+                Ok(vars) => {
+                    eprintln!("DEBUG: DWARF found {} variables", vars.len());
+                    dwarf_variables = vars;
+                }
+                Err(e) => {
+                    eprintln!("Warning: DWARF variable extraction failed: {}", e);
+                }
+            }
+        } else {
+            eprintln!("DEBUG: No RIP available, skipping DWARF evaluation");
+        }
+
+        // 戦略2: Generator レイアウト（フォールバック）
+        let discriminant = self.read_discriminant(task_id, type_name.as_deref()).unwrap_or(0);
+        eprintln!("DEBUG: Generator discriminant = {}", discriminant);
+
+        let analyzer = GeneratorLayoutAnalyzer::new(loader.dwarf());
+
+        // 型名が取得できている場合はそれを使用、できていない場合は空文字列
+        let func_name = type_name.as_deref().unwrap_or("");
+        eprintln!("DEBUG: Looking for generator variant with func_name='{}' and discriminant={}", func_name, discriminant);
+
+        let mut generator_variables = Vec::new();
+        match analyzer.get_variant_info(func_name, discriminant) {
+            Ok(Some(variant_info)) => {
+                eprintln!("DEBUG: Generator found {} fields", variant_info.fields.len());
+                for field in variant_info.fields {
+                let addr = task_id + field.offset;
+
+                // フィールドの値を読み取る
+                let value = match field.size {
+                    1 => memory.read_u8(addr as usize).ok()
+                        .map(|v| VariableValue::UnsignedInteger(v as u64)),
+                    2 => memory.read_u16(addr as usize).ok()
+                        .map(|v| VariableValue::UnsignedInteger(v as u64)),
+                    4 => memory.read_u32(addr as usize).ok()
+                        .map(|v| VariableValue::UnsignedInteger(v as u64)),
+                    8 => memory.read_u64(addr as usize).ok()
+                        .map(|v| VariableValue::UnsignedInteger(v)),
+                    _ => memory.read(addr as usize, field.size as usize).ok()
+                        .map(|bytes| VariableValue::Bytes(bytes)),
+                };
+
+                    generator_variables.push(Variable {
+                        name: field.name,
+                        type_name: field.type_name.unwrap_or_else(|| format!("{} bytes", field.size)),
+                        value,
+                        location: VariableLocation::Address(addr),
+                    });
+                }
+            }
+            Ok(None) => {
+                eprintln!("DEBUG: No variant info found for discriminant {}", discriminant);
+            }
+            Err(e) => {
+                eprintln!("DEBUG: Generator layout analysis failed: {}", e);
+            }
+        }
+
+        // マージ: DWARFとGeneratorの変数をアドレスでマージ
+        // DWARF変数を優先し、同じアドレスのGenerator変数は除外
+        let mut result = dwarf_variables;
+
+        // DWARFで見つかったアドレスを収集
+        let dwarf_addrs: std::collections::HashSet<u64> = result.iter()
+            .filter_map(|v| {
+                if let VariableLocation::Address(addr) = v.location {
+                    Some(addr)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Generator変数のうち、DWARFで見つからなかったものを追加
+        for gen_var in generator_variables {
+            if let VariableLocation::Address(addr) = gen_var.location {
+                if !dwarf_addrs.contains(&addr) {
+                    result.push(gen_var);
+                }
+            } else {
+                result.push(gen_var);
+            }
+        }
+
+        eprintln!("DEBUG: Total {} variables found", result.len());
+        for var in &result {
+            eprintln!("  - {} : {} = {:?}", var.name, var.type_name, var.value);
+        }
+
+        Ok(result)
     }
 
     /// 変数の値を読み取る

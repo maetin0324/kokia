@@ -179,6 +179,15 @@ fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
         Some(Command::AsyncTasks) => handle_async_tasks(debugger)?,
         Some(Command::AsyncEdges) => handle_async_edges(debugger)?,
         Some(Command::AsyncEnable) => handle_async_enable(debugger)?,
+        Some(Command::AsyncLocals) => {
+            // "async locals <TaskId>" から "locals <TaskId>" 部分を取得
+            let cmd_str = if line.starts_with("async ") {
+                &line[6..]  // "async " の6文字をスキップ
+            } else {
+                line
+            };
+            handle_async_locals(debugger, cmd_str)?;
+        }
         None => handle_custom_command(debugger, line)?,
         _ => println!("Command not yet implemented: {}", line),
     }
@@ -575,7 +584,7 @@ fn handle_async_locals(debugger: &mut Debugger, cmd: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Invalid TaskId: {}", e))?;
 
     // Async local variablesを取得
-    match debugger.get_async_local_variables(task_id) {
+    match debugger.get_async_locals(task_id) {
         Ok(variables) => {
             if variables.is_empty() {
                 println!("No local variables found for task {:#x}", task_id);
