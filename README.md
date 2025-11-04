@@ -58,6 +58,3 @@ The tracker maintains:
 - Discriminant values (suspend points)
 - Logical async call stack
 
-## License
-
-MIT OR Apache-2.0
