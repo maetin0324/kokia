@@ -19,6 +19,12 @@ pub enum Command {
     AsyncBacktrace,
     /// async関数のローカル変数表示
     AsyncLocals,
+    /// asyncタスク一覧表示
+    AsyncTasks,
+    /// asyncエッジ（親子関係）表示
+    AsyncEdges,
+    /// asyncトラッキングを有効化（GenFuture::pollにブレークポイント設定）
+    AsyncEnable,
     /// ヘルプ表示
     Help,
     /// 終了
@@ -51,6 +57,9 @@ impl Command {
                     match parts[1] {
                         "bt" | "backtrace" => Some(Command::AsyncBacktrace),
                         "locals" | "l" => Some(Command::AsyncLocals),
+                        "tasks" => Some(Command::AsyncTasks),
+                        "edges" => Some(Command::AsyncEdges),
+                        "enable" => Some(Command::AsyncEnable),
                         _ => None,
                     }
                 } else {

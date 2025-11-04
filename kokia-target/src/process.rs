@@ -10,6 +10,8 @@ use std::path::Path;
 pub enum StopReason {
     /// ブレークポイントヒット（SIGTRAP）
     Breakpoint,
+    /// ステップ実行完了（SIGTRAP）
+    Step,
     /// シグナル受信
     Signal(Signal),
     /// プロセス終了
@@ -129,6 +131,38 @@ impl Process {
                 // SIGTRAPはブレークポイントヒット
                 if signal == Signal::SIGTRAP {
                     Ok(StopReason::Breakpoint)
+                } else {
+                    Ok(StopReason::Signal(signal))
+                }
+            }
+            WaitStatus::Exited(_, code) => Ok(StopReason::Exited(code)),
+            WaitStatus::Signaled(_, signal, _) => {
+                Ok(StopReason::Signal(signal))
+            }
+            _ => Ok(StopReason::Other),
+        }
+    }
+
+    /// 1命令だけ実行して停止する（ステップ実行）
+    ///
+    /// プロセスの1命令だけを実行し、次の停止イベントまで待機します。
+    /// 関数呼び出しの中にも入ります（ステップイン）。
+    pub fn step(&self) -> Result<StopReason> {
+        use nix::sys::ptrace;
+        use nix::sys::wait::{waitpid, WaitStatus};
+
+        // 1命令だけ実行
+        ptrace::step(self.pid, None)?;
+
+        // 停止イベントを待機
+        let status = waitpid(self.pid, None)?;
+
+        match status {
+            WaitStatus::Stopped(_, signal) => {
+                // SIGTRAPはステップ実行完了
+                // （ブレークポイントヒットの場合は、呼び出し元で判定する）
+                if signal == Signal::SIGTRAP {
+                    Ok(StopReason::Step)
                 } else {
                     Ok(StopReason::Signal(signal))
                 }

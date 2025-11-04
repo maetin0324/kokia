@@ -22,6 +22,17 @@ pub struct Variable {
     pub value: Option<VariableValue>,
 }
 
+/// ローカル変数情報
+#[derive(Debug, Clone)]
+pub struct LocalVariable {
+    /// 変数名
+    pub name: String,
+    /// フレームベースからのオフセット（DW_OP_fbreg の場合）
+    pub offset_from_frame_base: Option<i64>,
+    /// 型名（簡略化版）
+    pub type_name: Option<String>,
+}
+
 /// 変数ロケーター
 pub struct VariableLocator {
     // TODO: DWARF変数情報とロケーション式評価機を保持する

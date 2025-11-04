@@ -107,6 +107,20 @@ impl Memory {
         self.write(addr, &value.to_le_bytes())
     }
 
+    /// u32値を読み取る（リトルエンディアン）
+    pub fn read_u32(&self, addr: usize) -> Result<u32> {
+        let bytes = self.read(addr, 4)?;
+        let len = bytes.len();
+        let array: [u8; 4] = bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to convert {} bytes to u32 array (expected 4 bytes)", len))?;
+        Ok(u32::from_le_bytes(array))
+    }
+
+    /// u32値を書き込む（リトルエンディアン）
+    pub fn write_u32(&self, addr: usize, value: u32) -> Result<()> {
+        self.write(addr, &value.to_le_bytes())
+    }
+
     /// u8値を読み取る
     pub fn read_u8(&self, addr: usize) -> Result<u8> {
         let bytes = self.read(addr, 1)?;
@@ -181,27 +195,34 @@ impl Memory {
             .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", maps_path, e))?;
         let reader = BufReader::new(file);
 
-        // 最初の実行可能セグメントを見つける
+        // 最初の実行可能セグメントを見つけて、ファイルオフセットを引く
         for line in reader.lines() {
             let line = line?;
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 2 {
+            if parts.len() < 6 {
                 continue;
             }
 
-            // アドレス範囲とパーミッションをパース
+            // アドレス範囲、パーミッション、オフセットをパース
             let addr_parts: Vec<&str> = parts[0].split('-').collect();
             if addr_parts.len() != 2 {
                 continue;
             }
 
             let perms = parts[1];
+            let offset_str = parts[2];
 
             // 実行可能（x）フラグがあるセグメントを探す
             if perms.chars().nth(2) == Some('x') {
                 let start = usize::from_str_radix(addr_parts[0], 16)
                     .map_err(|e| anyhow::anyhow!("Failed to parse base address: {}", e))?;
-                return Ok(start);
+                let offset = usize::from_str_radix(offset_str, 16)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse segment offset: {}", e))?;
+
+                // PIEの場合、シンボルオフセットはファイル内のオフセットなので、
+                // セグメントのファイルオフセットを引いた値を返す
+                let base = start - offset;
+                return Ok(base);
             }
         }
 

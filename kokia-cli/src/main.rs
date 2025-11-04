@@ -132,6 +132,15 @@ fn run_repl(debugger: &mut Debugger) -> Result<()> {
     Ok(())
 }
 
+/// シンボル名をデマングルするヘルパー関数
+fn demangle_name(name: &str) -> String {
+    if let Ok(demangled) = rustc_demangle::try_demangle(name) {
+        format!("{:#}", demangled)
+    } else {
+        name.to_string()
+    }
+}
+
 /// シンボルリストを表示するヘルパー関数
 fn print_symbol_list(title: &str, symbols: &[kokia_core::Symbol], limit: Option<usize>) {
     if symbols.is_empty() {
@@ -144,9 +153,9 @@ fn print_symbol_list(title: &str, symbols: &[kokia_core::Symbol], limit: Option<
 
     for (i, sym) in symbols.iter().take(display_limit).enumerate() {
         if sym.size > 0 {
-            println!("  {}. {} @ 0x{:x} (size: {})", i + 1, sym.name, sym.address, sym.size);
+            println!("  {}. {} @ 0x{:x} (size: {})", i + 1, sym.demangled_name, sym.address, sym.size);
         } else {
-            println!("  {}. {} @ 0x{:x}", i + 1, sym.name, sym.address);
+            println!("  {}. {} @ 0x{:x}", i + 1, sym.demangled_name, sym.address);
         }
     }
 
@@ -163,7 +172,12 @@ fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
         Some(Command::Quit) => handle_quit(),
         Some(Command::Break(loc)) => handle_break(debugger, &loc)?,
         Some(Command::Continue) => handle_continue(debugger)?,
+        Some(Command::Step) => handle_step(debugger)?,
+        Some(Command::Backtrace) => handle_backtrace(debugger)?,
         Some(Command::AsyncBacktrace) => handle_async_backtrace(debugger)?,
+        Some(Command::AsyncTasks) => handle_async_tasks(debugger)?,
+        Some(Command::AsyncEdges) => handle_async_edges(debugger)?,
+        Some(Command::AsyncEnable) => handle_async_enable(debugger)?,
         None => handle_custom_command(debugger, line)?,
         _ => println!("Command not yet implemented: {}", line),
     }
@@ -184,14 +198,44 @@ fn handle_break(debugger: &mut Debugger, loc: &str) -> Result<()> {
         if let Ok(addr) = u64::from_str_radix(&loc.trim_start_matches("0x"), 16) {
             let bp_id = debugger.set_breakpoint(addr)?;
             println!("Breakpoint {} set at 0x{:x}", bp_id, addr);
+
+            // シンボル情報があれば表示（デマングル済み）
+            if let Some(symbol) = debugger.reverse_resolve(addr) {
+                println!("  at {}", symbol.demangled_name);
+                if let Some((file, line)) = debugger.get_line_info(addr) {
+                    println!("     ({}:{})", file, line);
+                }
+            }
+
             return Ok(());
         }
     }
 
     // シンボル名として解釈（PIEの場合のみベースアドレスを加算）
+    // まずシンボルを検索してデマングル名を取得
+    let symbols = debugger.find_symbols(loc);
+    let matched_symbol = symbols
+        .iter()
+        .find(|s| s.name == loc || s.demangled_name == loc);
+
     match debugger.set_breakpoint_by_symbol(loc) {
         Ok(bp_id) => {
-            println!("Breakpoint {} set at symbol '{}'", bp_id, loc);
+            print!("Breakpoint {} set", bp_id);
+
+            // マッチしたシンボルの情報を表示
+            if let Some(symbol) = matched_symbol {
+                println!(" at {}", symbol.demangled_name);
+
+                // ブレークポイントを検索してアドレスと行番号を表示
+                if let Some(bp) = debugger.breakpoints().find(|b| b.id == bp_id) {
+                    if let Some((file, line)) = debugger.get_line_info(bp.address) {
+                        println!("  ({}:{})", file, line);
+                    }
+                }
+            } else {
+                println!(" at symbol '{}'", loc);
+            }
+
             Ok(())
         }
         Err(e) => {
@@ -216,13 +260,22 @@ fn handle_continue(debugger: &mut Debugger) -> Result<()> {
             let pc = debugger.get_pc()?;
             println!("Stopped at 0x{:x}", pc);
 
-            // シンボルを逆引き
+            // シンボルを逆引き（デマングル済み）
             if let Some(symbol) = debugger.reverse_resolve(pc) {
-                println!("In function: {}", symbol.name);
+                println!("In function: {}", symbol.demangled_name);
                 if symbol.size > 0 {
                     println!("Function address: 0x{:x}, size: {}", symbol.address, symbol.size);
                 }
+
+                // ソースファイルと行番号を表示
+                if let Some((file, line)) = debugger.get_line_info(pc) {
+                    println!("  at {}:{}", file, line);
+                }
             }
+        }
+        StopReason::Step => {
+            println!();
+            println!("Stepped (unexpected during continue)");
         }
         StopReason::Signal(signal) => {
             println!();
@@ -241,10 +294,256 @@ fn handle_continue(debugger: &mut Debugger) -> Result<()> {
     Ok(())
 }
 
+/// Stepコマンドを処理する
+fn handle_step(debugger: &mut Debugger) -> Result<()> {
+    let stop_reason = debugger.step()?;
+
+    // PCを取得
+    let pc = debugger.get_pc()?;
+    println!("Stepped to 0x{:x}", pc);
+
+    // シンボルを逆引き（デマングル済み）
+    if let Some(symbol) = debugger.reverse_resolve(pc) {
+        println!("In function: {}", symbol.demangled_name);
+
+        // ソースファイルと行番号を表示
+        if let Some((file, line)) = debugger.get_line_info(pc) {
+            println!("  at {}:{}", file, line);
+        }
+    }
+
+    match stop_reason {
+        StopReason::Step => {
+            // 通常のステップ実行完了
+        }
+        StopReason::Breakpoint => {
+            println!("(at breakpoint)");
+        }
+        StopReason::Signal(signal) => {
+            println!("Received signal: {:?}", signal);
+        }
+        StopReason::Exited(code) => {
+            println!("Process exited with code {}", code);
+        }
+        StopReason::Other => {}
+    }
+
+    Ok(())
+}
+
+/// Backtraceコマンドを処理する
+fn handle_backtrace(debugger: &mut Debugger) -> Result<()> {
+    let frames = debugger.backtrace()?;
+
+    if frames.is_empty() {
+        println!("No stack frames found");
+        return Ok(());
+    }
+
+    println!("Stack backtrace:");
+    for frame in &frames {
+        print!("  #{:<3} ", frame.frame_number);
+
+        // 関数名（デマングル済み）
+        if let Some(ref name) = frame.function_name {
+            print!("{}", name);
+        } else {
+            print!("<unknown>");
+        }
+
+        // ソースファイルと行番号
+        if let (Some(ref file), Some(line)) = (&frame.file, frame.line) {
+            print!("\n        at {}:{}", file, line);
+        }
+
+        // アドレス
+        println!("\n        (0x{:x})", frame.pc);
+    }
+
+    Ok(())
+}
+
+/// タスク情報を整形して表示するヘルパー関数
+///
+/// # Arguments
+/// * `task` - タスク情報
+/// * `prefix` - 各行の接頭辞（インデント用）
+/// * `verbose` - 詳細モード（true: 複数行、false: 1行）
+fn format_task_info(task: &kokia_core::TaskInfo, prefix: &str, verbose: bool) {
+    if verbose {
+        // 詳細モード：複数行で表示
+        print!("{}Task 0x{:x}", prefix, task.id);
+        if let Some(ref type_name) = task.type_name {
+            // デマングルして表示
+            print!("\n{}   Type: {}", prefix, demangle_name(type_name));
+        }
+
+        let mut flags = Vec::new();
+        if task.is_root {
+            flags.push("root task");
+        }
+        if task.completed {
+            flags.push("completed");
+        }
+
+        if !flags.is_empty() {
+            print!("\n{}   [{}]", prefix, flags.join(", "));
+        }
+        println!();
+    } else {
+        // 簡潔モード：1行で表示
+        print!("{}Task 0x{:x}", prefix, task.id);
+
+        if let Some(ref type_name) = task.type_name {
+            // デマングルして表示
+            print!(" ({})", demangle_name(type_name));
+        }
+
+        let mut flags = Vec::new();
+        if task.is_root {
+            flags.push("root");
+        }
+        if task.completed {
+            flags.push("completed");
+        }
+
+        if !flags.is_empty() {
+            print!(" [{}]", flags.join(", "));
+        }
+        println!();
+    }
+}
+
 /// AsyncBacktraceコマンドを処理する
 fn handle_async_backtrace(debugger: &mut Debugger) -> Result<()> {
-    let async_symbols = debugger.find_async_symbols();
-    print_symbol_list("Async functions", &async_symbols, Some(10));
+    use kokia_core::Tid;
+
+    // TODO: 現在のスレッドIDを取得する（現時点ではプロセスIDを使用）
+    let pid = debugger.pid().ok_or_else(|| anyhow::anyhow!("No process attached"))?;
+    let tid = Tid(pid);
+
+    let backtrace = debugger.async_tracker().async_backtrace(tid);
+
+    if backtrace.is_empty() {
+        println!("No async backtrace available");
+        println!("Note: Async backtrace is built by observing GenFuture::poll calls");
+        return Ok(());
+    }
+
+    println!("Async backtrace (logical stack):");
+    for (i, task_id) in backtrace.iter().enumerate() {
+        if let Some(task) = debugger.async_tracker().get_task(*task_id) {
+            print!("  #{:<3} ", i);
+            format_task_info(task, "     ", true);
+        } else {
+            println!("  #{} Task 0x{:x}", i, task_id);
+        }
+    }
+
+    Ok(())
+}
+
+/// AsyncTasksコマンドを処理する
+fn handle_async_tasks(debugger: &mut Debugger) -> Result<()> {
+    let tasks = debugger.async_tracker().all_tasks();
+
+    if tasks.is_empty() {
+        println!("No async tasks tracked");
+        println!("Note: Tasks are discovered by observing GenFuture::poll calls");
+        return Ok(());
+    }
+
+    println!("Async tasks ({} total):", tasks.len());
+    for task in tasks {
+        format_task_info(task, "  ", false);
+    }
+
+    Ok(())
+}
+
+/// AsyncEdgesコマンドを処理する
+fn handle_async_edges(debugger: &mut Debugger) -> Result<()> {
+    let edges = debugger.async_tracker().all_edges();
+
+    if edges.is_empty() {
+        println!("No async edges tracked");
+        println!("Note: Edges (parent-child relationships) are built by observing GenFuture::poll calls");
+        return Ok(());
+    }
+
+    println!("Async edges (parent awaits child):");
+    for edge in edges {
+        print!("  0x{:x} -> 0x{:x}", edge.parent, edge.child);
+
+        if let Some(callsite) = debugger.async_tracker().get_callsite(edge.callsite) {
+            if let (Some(ref file), Some(line)) = (&callsite.file, callsite.line) {
+                print!(" at {}:{}", file, line);
+            }
+            if let Some(suspend_idx) = callsite.suspend_idx {
+                print!(" (suspend_idx: {})", suspend_idx);
+            }
+        }
+
+        if edge.completed {
+            print!(" [completed]");
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+/// AsyncEnableコマンドを処理する
+fn handle_async_enable(debugger: &mut Debugger) -> Result<()> {
+    println!("Enabling async task tracking (runtime-independent mode)...");
+    println!("Searching for async function closures...");
+
+    let symbols = debugger.find_genfuture_poll_symbols();
+
+    if symbols.is_empty() {
+        println!("Warning: No async function closures found");
+        println!("Make sure the binary was compiled with debug symbols.");
+        println!();
+        println!("Possible causes:");
+        println!("  - The binary was compiled without debug info");
+        println!("  - All async functions were inlined by the optimizer");
+        println!();
+        println!("Workaround:");
+        println!("  Set breakpoints manually on your async functions:");
+        println!("  (kokia) find <your_function_name>");
+        println!("  (kokia) break <function_name>::{{{{closure}}}}");
+        return Ok(());
+    }
+
+    println!("Found {} async function closure(s)", symbols.len());
+    if symbols.len() <= 10 {
+        for sym in &symbols {
+            println!("  - {}", sym.demangled_name);
+        }
+    } else {
+        println!("  (showing first 10)");
+        for sym in symbols.iter().take(10) {
+            println!("  - {}", sym.demangled_name);
+        }
+        println!("  ... and {} more", symbols.len() - 10);
+    }
+
+    println!();
+    println!("Setting breakpoints on async function entry points...");
+
+    let breakpoint_ids = debugger.set_genfuture_poll_breakpoints()?;
+
+    println!("Successfully set {} breakpoint(s) for async tracking", breakpoint_ids.len());
+    println!();
+    println!("Note: In modern Rust, Future::poll is inlined, so we track async function");
+    println!("      entry points instead. This provides basic async task tracking.");
+    println!();
+    println!("Async tracking is now enabled (runtime-independent).");
+    println!("Use 'continue' to run the program and observe async tasks.");
+    println!("Use 'async tasks' to see tracked tasks.");
+    println!("Use 'async edges' to see parent-child relationships.");
+    println!("Use 'async bt' to see the async backtrace.");
+
     Ok(())
 }
 
@@ -284,15 +583,22 @@ fn print_help() {
     println!("Debug commands:");
     println!("  break <loc>    - Set breakpoint at symbol or address");
     println!("  continue (c)   - Continue execution");
+    println!("  step (s)       - Execute one instruction (step into)");
+    println!("  backtrace (bt) - Show stack backtrace");
     println!("  find <pattern> - Find symbols matching pattern");
     println!();
     println!("Async commands:");
+    println!("  async enable   - Enable async tracking (set GenFuture::poll breakpoints)");
     println!("  async list     - List all async-related symbols");
-    println!("  async bt       - Show async functions (same as 'async list')");
+    println!("  async bt       - Show async backtrace (logical stack)");
+    println!("  async tasks    - Show all tracked async tasks");
+    println!("  async edges    - Show async task parent-child relationships");
     println!();
     println!("Examples:");
     println!("  break main");
     println!("  break 0x1234");
+    println!("  step");
+    println!("  backtrace");
     println!("  find double");
-    println!("  async list");
+    println!("  async tasks");
 }

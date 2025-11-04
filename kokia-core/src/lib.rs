@@ -6,14 +6,16 @@
 pub mod debugger;
 pub mod breakpoint;
 pub mod command;
+pub mod disasm;
 
-pub use debugger::Debugger;
-pub use breakpoint::{Breakpoint, BreakpointId};
+pub use debugger::{Debugger, StackFrame};
+pub use breakpoint::{Breakpoint, BreakpointId, BreakpointType};
 pub use command::Command;
 
 // 他のクレートから使用するために再エクスポート
 pub use kokia_dwarf::Symbol;
 pub use kokia_target::StopReason;
+pub use kokia_async::{Tid, TaskInfo};
 
 /// デバッガの結果型
 pub type Result<T> = anyhow::Result<T>;

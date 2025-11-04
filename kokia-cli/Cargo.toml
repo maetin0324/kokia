@@ -14,5 +14,6 @@ kokia-core = { path = "../kokia-core" }
 rustyline.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+rustc-demangle.workspace = true
 
 [dev-dependencies]

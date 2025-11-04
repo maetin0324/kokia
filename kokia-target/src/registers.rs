@@ -40,4 +40,28 @@ impl Registers {
         regs.rip = pc;
         self.write(regs)
     }
+
+    /// ベースポインタ（RBP）を取得する
+    pub fn get_rbp(&self) -> Result<u64> {
+        let regs = self.read()?;
+        Ok(regs.rbp)
+    }
+
+    /// スタックポインタ（RSP）を取得する
+    pub fn get_rsp(&self) -> Result<u64> {
+        let regs = self.read()?;
+        Ok(regs.rsp)
+    }
+
+    /// RDIレジスタを取得する（x86_64 System V ABI 第1引数）
+    pub fn get_rdi(&self) -> Result<u64> {
+        let regs = self.read()?;
+        Ok(regs.rdi)
+    }
+
+    /// RAXレジスタを取得する（x86_64 System V ABI 戻り値）
+    pub fn get_rax(&self) -> Result<u64> {
+        let regs = self.read()?;
+        Ok(regs.rax)
+    }
 }

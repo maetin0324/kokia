@@ -7,12 +7,24 @@ use std::collections::HashMap;
 /// ブレークポイントID
 pub type BreakpointId = usize;
 
+/// ブレークポイントのタイプ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakpointType {
+    /// ユーザーが設定した通常のブレークポイント
+    User,
+    /// Asyncタスクトラッキング用のブレークポイント（エントリー）
+    AsyncEntry,
+    /// Asyncタスクトラッキング用のブレークポイント（イグジット）
+    AsyncExit,
+}
+
 /// ブレークポイント
 #[derive(Debug, Clone)]
 pub struct Breakpoint {
     pub id: BreakpointId,
     pub address: u64,
     pub enabled: bool,
+    pub bp_type: BreakpointType,
 }
 
 /// ブレークポイントマネージャ
@@ -35,6 +47,16 @@ impl BreakpointManager {
 
     /// ブレークポイントを追加し、有効化する
     pub fn add_and_enable(&mut self, address: u64, memory: &Memory) -> Result<BreakpointId> {
+        self.add_and_enable_with_type(address, memory, BreakpointType::User)
+    }
+
+    /// ブレークポイントを追加し、有効化する（タイプ指定版）
+    pub fn add_and_enable_with_type(
+        &mut self,
+        address: u64,
+        memory: &Memory,
+        bp_type: BreakpointType,
+    ) -> Result<BreakpointId> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -42,6 +64,7 @@ impl BreakpointManager {
             id,
             address,
             enabled: true,
+            bp_type,
         };
 
         let mut sw_bp = SoftwareBreakpoint::new(address);
@@ -72,6 +95,36 @@ impl BreakpointManager {
     /// ブレークポイントの数を取得する
     pub fn count(&self) -> usize {
         self.breakpoints.len()
+    }
+
+    /// 指定されたアドレスにブレークポイントがあるか検索する
+    pub fn find_by_address(&self, address: u64) -> Option<BreakpointId> {
+        self.breakpoints
+            .values()
+            .find(|(bp, _)| bp.address == address && bp.enabled)
+            .map(|(bp, _)| bp.id)
+    }
+
+    /// ブレークポイントを一時的に無効化する
+    pub fn disable_temporarily(&mut self, id: BreakpointId, memory: &Memory) -> Result<()> {
+        if let Some((bp, sw_bp)) = self.breakpoints.get_mut(&id) {
+            if bp.enabled {
+                sw_bp.disable(memory)?;
+                bp.enabled = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// ブレークポイントを再有効化する
+    pub fn reenable(&mut self, id: BreakpointId, memory: &Memory) -> Result<()> {
+        if let Some((bp, sw_bp)) = self.breakpoints.get_mut(&id) {
+            if !bp.enabled {
+                sw_bp.enable(memory)?;
+                bp.enabled = true;
+            }
+        }
+        Ok(())
     }
 }
 

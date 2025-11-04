@@ -9,6 +9,7 @@ license.workspace = true
 gimli.workspace = true
 object.workspace = true
 addr2line.workspace = true
+rustc-demangle.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 

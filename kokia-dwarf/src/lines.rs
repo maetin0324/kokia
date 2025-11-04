@@ -28,7 +28,6 @@ impl<'a> LineInfoProvider<'a> {
     /// 関数プロローグをスキップして、最初の実際のソースコード行のアドレスを返します。
     /// これはgdbがブレークポイントを設定する位置と同じです。
     pub fn find_first_line_in_range(&self, start_addr: u64, end_addr: u64) -> Result<Option<u64>> {
-        eprintln!("[DEBUG] find_first_line_in_range: 0x{:x} - 0x{:x}", start_addr, end_addr);
         let dwarf = self.loader.dwarf();
         let mut units = dwarf.units();
 
@@ -37,7 +36,6 @@ impl<'a> LineInfoProvider<'a> {
 
             // 行番号プログラムを取得
             if let Some(line_program) = unit.line_program.clone() {
-                eprintln!("[DEBUG] Processing line program in unit");
                 let mut rows = line_program.rows();
                 let mut first_line_addr: Option<u64> = None;
 

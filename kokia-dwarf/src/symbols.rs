@@ -7,9 +7,42 @@ use object::{Object, ObjectSymbol};
 /// シンボル情報
 #[derive(Debug, Clone)]
 pub struct Symbol {
+    /// マングルされたシンボル名
     pub name: String,
+    /// デマングルされたシンボル名（可読な形式）
+    pub demangled_name: String,
     pub address: u64,
     pub size: u64,
+}
+
+impl Symbol {
+    /// シンボルを作成し、デマングルされた名前を設定する
+    pub fn new(name: String, address: u64, size: u64) -> Self {
+        let demangled_name = demangle_symbol(&name);
+        Self {
+            name,
+            demangled_name,
+            address,
+            size,
+        }
+    }
+
+    /// 表示用の名前を取得（デマングル可能ならデマングル後、できなければマングル名）
+    pub fn display_name(&self) -> &str {
+        &self.demangled_name
+    }
+}
+
+/// シンボル名をデマングルする
+fn demangle_symbol(name: &str) -> String {
+    // Rustのシンボルをデマングル
+    if let Ok(demangled) = rustc_demangle::try_demangle(name) {
+        return format!("{:#}", demangled);
+    }
+
+    // C++のシンボルをデマングルする場合は、cpp_demangleクレートを使用
+    // 現時点ではRustのみサポート
+    name.to_string()
 }
 
 /// シンボル解決
@@ -35,11 +68,7 @@ impl SymbolResolver {
                     let address = symbol.address();
                     let size = symbol.size();
 
-                    let sym = Symbol {
-                        name: name.to_string(),
-                        address,
-                        size,
-                    };
+                    let sym = Symbol::new(name.to_string(), address, size);
 
                     symbols_by_name.insert(name.to_string(), sym.clone());
                     symbols_by_address.push(sym);
@@ -100,10 +129,11 @@ impl SymbolResolver {
     }
 
     /// パターンにマッチするシンボルを検索する
+    /// マングル名とデマングル名の両方で検索する
     pub fn find_symbols(&self, pattern: &str) -> Vec<Symbol> {
         self.symbols_by_name
             .values()
-            .filter(|s| s.name.contains(pattern))
+            .filter(|s| s.name.contains(pattern) || s.demangled_name.contains(pattern))
             .cloned()
             .collect()
     }
