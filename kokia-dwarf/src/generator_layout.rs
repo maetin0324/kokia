@@ -134,13 +134,13 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         }
 
         if closure_types_found > 0 {
-            eprintln!("DEBUG: Found {} closure types total (searched {} structures, {} enums), but none matched '{}'",
+            debug!("Found {} closure types total (searched {} structures, {} enums), but none matched '{}'",
                 closure_types_found, structure_types_found, enumeration_types_found, type_name);
         } else {
-            eprintln!("DEBUG: No closure types found in this unit ({} structures, {} enums, {} names extracted)",
+            debug!("No closure types found in this unit ({} structures, {} enums, {} names extracted)",
                 structure_types_found, enumeration_types_found, names_extracted);
             if !sample_names.is_empty() {
-                eprintln!("DEBUG: Sample type names: {:?}", &sample_names[..sample_names.len().min(5)]);
+                debug!("Sample type names: {:?}", &sample_names[..sample_names.len().min(5)]);
             }
         }
 
@@ -183,10 +183,10 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
             let entry = child.entry();
 
             if entry.tag() == gimli::DW_TAG_variant_part {
-                eprintln!("DEBUG: Found DW_TAG_variant_part");
+                debug!("Found DW_TAG_variant_part");
                 // DW_AT_discr属性でdiscriminant memberを特定
                 if let Some(gimli::AttributeValue::UnitRef(discr_offset)) = entry.attr_value(gimli::DW_AT_discr)? {
-                    eprintln!("DEBUG: Found DW_AT_discr pointing to offset {:?}", discr_offset);
+                    debug!("Found DW_AT_discr pointing to offset {:?}", discr_offset);
                     // Discriminant memberエントリを取得
                     let mut entries = unit.entries_at_offset(discr_offset)?;
                     if let Some((_, discr_entry)) = entries.next_dfs()? {
@@ -194,7 +194,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                         let offset = self.get_member_offset(discr_entry)?;
                         let size = self.get_member_size(unit, discr_entry)?;
 
-                        eprintln!("DEBUG: Discriminant field '{}' at offset={:?}, size={:?}", name, offset, size);
+                        debug!("Discriminant field '{}' at offset={:?}, size={:?}", name, offset, size);
 
                         return Ok(Some(DiscriminantLayout {
                             offset: offset.unwrap_or(0),
@@ -206,7 +206,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         }
 
         // フォールバック: 古い方法（"__0", "discriminant", 最初のフィールド）
-        eprintln!("DEBUG: No DW_TAG_variant_part found, trying fallback method");
+        debug!("No DW_TAG_variant_part found, trying fallback method");
         // rootを再度取得
         let mut tree2 = unit.entries_tree(Some(parent.offset()))?;
         let root2 = tree2.root()?;
@@ -220,7 +220,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                         let offset = self.get_member_offset(entry)?;
                         let size = self.get_member_size(unit, entry)?;
 
-                        eprintln!("DEBUG: Found discriminant field by name '{}': offset={:?}, size={:?}", name, offset, size);
+                        debug!("Found discriminant field by name '{}': offset={:?}, size={:?}", name, offset, size);
 
                         return Ok(Some(DiscriminantLayout {
                             offset: offset.unwrap_or(0),
@@ -231,7 +231,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
             }
         }
 
-        eprintln!("DEBUG: No discriminant field found");
+        debug!("No discriminant field found");
         Ok(None)
     }
 
@@ -327,26 +327,26 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
 
                         // ラッパー型（<を含む）をスキップ - これらは実際のジェネレーター状態マシンではない
                         if name.contains('<') {
-                            eprintln!("DEBUG: find_variant_in_unit: Skipping wrapper type '{}'", name);
+                            debug!("find_variant_in_unit: Skipping wrapper type '{}'", name);
                             continue;
                         }
 
                         // 非ラッパー型が見つかった
-                        eprintln!("DEBUG: find_variant_in_unit: Found non-wrapper closure type '{}'", name);
+                        debug!("find_variant_in_unit: Found non-wrapper closure type '{}'", name);
 
                         // すべての候補を記録（ラッパーでないもののみ）
                         if name == "{async_block_env#0}" || name == "{closure_env#0}" || name == "{async_fn_env#0}" {
-                            eprintln!("DEBUG: find_variant_in_unit: Found candidate '{}' at offset {:?}", name, entry.offset());
+                            debug!("find_variant_in_unit: Found candidate '{}' at offset {:?}", name, entry.offset());
                             candidates.push((name.clone(), entry.offset()));
                         }
 
                         // マッチングロジック（get_discriminant_layoutと同じ）
                         let type_prefix = type_name.split("::{{").next().unwrap_or(type_name);
-                        eprintln!("DEBUG: find_variant_in_unit: Checking if '{}' matches type_prefix '{}'", name, type_prefix);
+                        debug!("find_variant_in_unit: Checking if '{}' matches type_prefix '{}'", name, type_prefix);
 
                         // パターン1: {async_block_env#0}, {async_fn_env#0} 単独（最優先）
                         if name == "{async_block_env#0}" || name == "{closure_env#0}" || name == "{async_fn_env#0}" {
-                            eprintln!("DEBUG: find_variant_in_unit: Pattern 1 exact match '{}'", name);
+                            debug!("find_variant_in_unit: Pattern 1 exact match '{}'", name);
                             return self.extract_variant_info(unit, entry, discriminant_value);
                         }
 
@@ -355,7 +355,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
 
                         if is_toplevel_match {
                             // variant情報を取得
-                            eprintln!("DEBUG: find_variant_in_unit: Pattern 2 match: '{}' starts with '{}'", name, type_prefix);
+                            debug!("find_variant_in_unit: Pattern 2 match: '{}' starts with '{}'", name, type_prefix);
                             return self.extract_variant_info(unit, entry, discriminant_value);
                         }
                     }
@@ -364,15 +364,15 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         }
 
         // すべての候補を試す
-        eprintln!("DEBUG: find_variant_in_unit: Found {} closure types, {} candidates for '{}'", closure_count, candidates.len(), type_name);
+        debug!("find_variant_in_unit: Found {} closure types, {} candidates for '{}'", closure_count, candidates.len(), type_name);
         for (name, offset) in &candidates {
-            eprintln!("DEBUG: Candidate: '{}' at offset {:?}", name, offset);
+            debug!("Candidate: '{}' at offset {:?}", name, offset);
         }
 
         // 最初の候補を試す
         if !candidates.is_empty() {
             let (name, offset) = &candidates[0];
-            eprintln!("DEBUG: Trying first candidate '{}' at offset {:?}", name, offset);
+            debug!("Trying first candidate '{}' at offset {:?}", name, offset);
 
             // オフセットからエントリを取得
             let mut entries = unit.entries_at_offset(*offset)?;
@@ -391,7 +391,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         parent: &gimli::DebuggingInformationEntry<R>,
         discriminant_value: u64,
     ) -> Result<Option<VariantInfo>> {
-        eprintln!("DEBUG: extract_variant_info called for discriminant={}", discriminant_value);
+        debug!("extract_variant_info called for discriminant={}", discriminant_value);
         let mut tree = unit.entries_tree(Some(parent.offset()))?;
         let root = tree.root()?;
 
@@ -400,11 +400,11 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         let mut variant_count = 0;
         while let Some(child) = children.next()? {
             let entry = child.entry();
-            eprintln!("DEBUG: Examining child tag: {:?}", entry.tag());
+            debug!("Examining child tag: {:?}", entry.tag());
 
             // DW_TAG_variant_part を探す（variantのコンテナ）
             if entry.tag() == gimli::DW_TAG_variant_part {
-                eprintln!("DEBUG: Found variant_part, examining its children");
+                debug!("Found variant_part, examining its children");
                 // variant_partの子要素（実際のvariant）を走査
                 let mut variant_children = child.children();
                 while let Some(variant_child) = variant_children.next()? {
@@ -412,23 +412,23 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
 
                     if variant_entry.tag() == gimli::DW_TAG_variant {
                         variant_count += 1;
-                        eprintln!("DEBUG: Found variant #{}", variant_count);
+                        debug!("Found variant #{}", variant_count);
 
                         // discriminant値が一致するか確認
                         if let Some(discr_val) = self.get_variant_discriminant(variant_entry)? {
-                            eprintln!("DEBUG: Variant has discriminant={}, looking for={}", discr_val, discriminant_value);
+                            debug!("Variant has discriminant={}, looking for={}", discr_val, discriminant_value);
                             if discr_val == discriminant_value {
                                 // variant名とフィールドを抽出
                                 let name = self.get_entry_name(variant_entry)?
                                     .unwrap_or_else(|| format!("Variant{}", discriminant_value));
-                                eprintln!("DEBUG: Found matching variant: {}", name);
+                                debug!("Found matching variant: {}", name);
                                 let fields = self.extract_variant_fields(unit, variant_child)?;
-                                eprintln!("DEBUG: Extracted {} fields from variant", fields.len());
+                                debug!("Extracted {} fields from variant", fields.len());
 
                                 return Ok(Some(VariantInfo { name, fields }));
                             }
                         } else {
-                            eprintln!("DEBUG: Variant has no discriminant value");
+                            debug!("Variant has no discriminant value");
                         }
                     }
                 }
@@ -436,28 +436,28 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
             // 直接のDW_TAG_variantも処理（フォールバック）
             else if entry.tag() == gimli::DW_TAG_variant {
                 variant_count += 1;
-                eprintln!("DEBUG: Found variant #{}", variant_count);
+                debug!("Found variant #{}", variant_count);
                 // discriminant値が一致するか確認
                 if let Some(discr_val) = self.get_variant_discriminant(entry)? {
-                    eprintln!("DEBUG: Variant has discriminant={}, looking for={}", discr_val, discriminant_value);
+                    debug!("Variant has discriminant={}, looking for={}", discr_val, discriminant_value);
                     if discr_val == discriminant_value {
                         // variant名とフィールドを抽出
                         let name = self.get_entry_name(entry)?
                             .unwrap_or_else(|| format!("Variant{}", discriminant_value));
-                        eprintln!("DEBUG: Found matching variant: {}", name);
+                        debug!("Found matching variant: {}", name);
                         let fields = self.extract_variant_fields(unit, child)?;
-                        eprintln!("DEBUG: Extracted {} fields from variant", fields.len());
+                        debug!("Extracted {} fields from variant", fields.len());
 
                         return Ok(Some(VariantInfo { name, fields }));
                     }
                 } else {
-                    eprintln!("DEBUG: Variant has no discriminant value");
+                    debug!("Variant has no discriminant value");
                 }
             }
         }
 
         // variantが見つからなかった場合、デフォルト情報を返す
-        eprintln!("DEBUG: No matching variant found, returning default empty variant");
+        debug!("No matching variant found, returning default empty variant");
         Ok(Some(VariantInfo {
             name: format!("State{}", discriminant_value),
             fields: Vec::new(),
@@ -499,7 +499,7 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                     if let Some((_, type_entry)) = type_entries.next_dfs()? {
                         // 型が構造体の場合、その中のフィールドを抽出
                         if type_entry.tag() == gimli::DW_TAG_structure_type {
-                            eprintln!("DEBUG: Found structure type in variant, extracting fields from it");
+                            debug!("Found structure type in variant, extracting fields from it");
                             // 構造体の中のフィールドを再帰的に取得
                             let struct_fields = self.extract_struct_fields(unit, type_entry)?;
                             fields.extend(struct_fields);
@@ -523,19 +523,19 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         unit: &gimli::Unit<R>,
         struct_entry: &gimli::DebuggingInformationEntry<R>,
     ) -> Result<Vec<FieldInfo>> {
-        eprintln!("DEBUG: extract_struct_fields called for entry at offset {:?}, tag={:?}",
+        debug!("extract_struct_fields called for entry at offset {:?}, tag={:?}",
                  struct_entry.offset(), struct_entry.tag());
         let mut fields = Vec::new();
 
         // 構造体名を表示
         if let Some(name) = self.get_entry_name(struct_entry)? {
-            eprintln!("DEBUG: extract_struct_fields: struct name='{}'", name);
+            debug!("extract_struct_fields: struct name='{}'", name);
         }
 
         // 構造体のサブツリーを作成
         let mut tree = unit.entries_tree(Some(struct_entry.offset()))?;
         let root = tree.root()?;
-        eprintln!("DEBUG: extract_struct_fields: created tree, root offset={:?}, tag={:?}",
+        debug!("extract_struct_fields: created tree, root offset={:?}, tag={:?}",
                  root.entry().offset(), root.entry().tag());
 
         // 構造体の子要素（フィールド）を走査
@@ -544,20 +544,20 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         while let Some(child) = children.next()? {
             child_count += 1;
             let entry = child.entry();
-            eprintln!("DEBUG: Examining struct child #{}: tag={:?}, offset={:?}",
+            debug!("Examining struct child #{}: tag={:?}, offset={:?}",
                      child_count, entry.tag(), entry.offset());
 
             if entry.tag() == gimli::DW_TAG_member {
-                eprintln!("DEBUG: Found DW_TAG_member");
+                debug!("Found DW_TAG_member");
                 if let Some(field) = self.extract_field_info(unit, entry)? {
-                    eprintln!("DEBUG: Extracted field: name={}, offset={}, size={}",
+                    debug!("Extracted field: name={}, offset={}, size={}",
                              field.name, field.offset, field.size);
                     fields.push(field);
                 }
             }
         }
 
-        eprintln!("DEBUG: extract_struct_fields found {} children, {} fields", child_count, fields.len());
+        debug!("extract_struct_fields found {} children, {} fields", child_count, fields.len());
         Ok(fields)
     }
 
