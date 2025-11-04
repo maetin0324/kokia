@@ -1005,29 +1005,29 @@ impl Debugger {
                             }
                         }
                         _ => {
-                            eprintln!("DEBUG: Unsupported discriminant size: {}, trying to read first byte", layout.size);
+                            debug!("Unsupported discriminant size: {}, trying to read first byte", layout.size);
                             // 大きなサイズの場合、最初の1バイトまたは4バイトを読む
                             if let Ok(val) = memory.read_u32(addr) {
-                                eprintln!("DEBUG: Read discriminant (first 4 bytes of {}-byte field): {}", layout.size, val);
+                                debug!("Read discriminant (first 4 bytes of {}-byte field): {}", layout.size, val);
                                 return Some(val as u64);
                             }
                         }
                     }
                 } else {
-                    eprintln!("DEBUG: No discriminant layout found in DWARF");
+                    debug!("No discriminant layout found in DWARF");
                 }
             }
         }
 
         // フォールバック: デフォルトの動作（offset 0, size 4）
         // 生成器の discriminant は通常、構造体の先頭に u32 として配置される
-        eprintln!("DEBUG: Falling back to default discriminant read (offset=0, size=4)");
+        debug!("Falling back to default discriminant read (offset=0, size=4)");
         if let Ok(discr) = memory.read_u32(task_ptr as usize) {
-            eprintln!("DEBUG: Read discriminant (fallback) u32: {}", discr);
+            debug!("Read discriminant (fallback) u32: {}", discr);
             return Some(discr as u64);
         }
 
-        eprintln!("DEBUG: Failed to read discriminant");
+        debug!("Failed to read discriminant");
         None
     }
 
@@ -1077,14 +1077,14 @@ impl Debugger {
             if let Some(symbol) = symbol_resolver.reverse_resolve(pc_offset) {
                 // デマングルされた名前を使用（async関数の判定にはこちらが適している）
                 let func_name = &symbol.demangled_name;
-                eprintln!("DEBUG: detect_generator_self at function: {} (demangled)", func_name);
+                debug!("detect_generator_self at function: {} (demangled)", func_name);
 
                 // async関数（generator）かを判定
                 // async_block_env, async_fn_env, closure_env を含む関数名はasync関数
                 if func_name.contains("{closure}") || func_name.contains("{async_block") || func_name.contains("{async_fn") || func_name.contains("{closure_env") {
                     // 第一引数（RDI）がgenerator selfポインタ
                     let self_ptr = registers.get_rdi()?;
-                    eprintln!("DEBUG: Detected async function, self_ptr = 0x{:x}", self_ptr);
+                    debug!("Detected async function, self_ptr = 0x{:x}", self_ptr);
                     return Ok(Some((self_ptr, func_name.clone())));
                 }
             }
@@ -1113,7 +1113,7 @@ impl Debugger {
             .ok_or_else(|| anyhow::anyhow!("Registers not available"))?;
         let pc = registers.get_pc()?;
 
-        eprintln!("DEBUG: get_async_locals at PC 0x{:x}", pc);
+        debug!("get_async_locals at PC 0x{:x}", pc);
 
         // 現在のフレームがasync関数（generator）かを判定
         // async関数の場合、第一引数（RDI）がgenerator selfポインタ
@@ -1125,16 +1125,16 @@ impl Debugger {
         let mut result_variables = Vec::new();
 
         // 戦略1: DWARF ロケーション評価（スタック/レジスタ上の変数）
-        eprintln!("DEBUG: Attempting DWARF location evaluation at PC 0x{:x}", pc);
+        debug!("Attempting DWARF location evaluation at PC 0x{:x}", pc);
 
         // PIE対応: ランタイムアドレスをオフセットに変換
         let pc_offset = match self.runtime_addr_to_offset(pc) {
             Ok(offset) => {
-                eprintln!("DEBUG: Converted PC 0x{:x} -> offset 0x{:x}", pc, offset);
+                debug!("Converted PC 0x{:x} -> offset 0x{:x}", pc, offset);
                 offset
             }
             Err(e) => {
-                eprintln!("DEBUG: Failed to convert PC to offset: {}", e);
+                debug!("Failed to convert PC to offset: {}", e);
                 pc // フォールバック: そのまま使用
             }
         };
@@ -1179,7 +1179,7 @@ impl Debugger {
         // DWARFロケーション評価を実行（オフセットアドレスを使用）
         match locator.get_locals_with_values(pc_offset, frame_base, get_reg, read_mem) {
             Ok(vars) => {
-                eprintln!("DEBUG: DWARF found {} variables", vars.len());
+                debug!("DWARF found {} variables", vars.len());
                 result_variables = vars;
             }
             Err(e) => {
@@ -1189,7 +1189,7 @@ impl Debugger {
 
         // 戦略2: Generator レイアウト（Future構造体内の変数）
         if let Some((self_ptr, type_name)) = generator_self {
-            eprintln!("DEBUG: Extracting generator variables from self_ptr=0x{:x}", self_ptr);
+            debug!("Extracting generator variables from self_ptr=0x{:x}", self_ptr);
 
             // Discriminantを読み取る
             let discriminant = self.read_discriminant(self_ptr, Some(&type_name)).unwrap_or(0);
