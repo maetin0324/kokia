@@ -180,13 +180,7 @@ fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
         Some(Command::AsyncEdges) => handle_async_edges(debugger)?,
         Some(Command::AsyncEnable) => handle_async_enable(debugger)?,
         Some(Command::AsyncLocals) => {
-            // "async locals <TaskId>" から "locals <TaskId>" 部分を取得
-            let cmd_str = if line.starts_with("async ") {
-                &line[6..]  // "async " の6文字をスキップ
-            } else {
-                line
-            };
-            handle_async_locals(debugger, cmd_str)?;
+            handle_async_locals(debugger)?;
         }
         None => handle_custom_command(debugger, line)?,
         _ => println!("Command not yet implemented: {}", line),
@@ -556,43 +550,19 @@ fn handle_async_edges(debugger: &mut Debugger) -> Result<()> {
 }
 
 /// AsyncLocalsコマンドを処理する
-fn handle_async_locals(debugger: &mut Debugger, cmd: &str) -> Result<()> {
+fn handle_async_locals(debugger: &mut Debugger) -> Result<()> {
     use kokia_dwarf::VariableLocation;
 
-    // TaskIDをパース（"locals <TaskId>" の形式）
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.len() < 2 {
-        // TaskIDが指定されていない場合は、現在のタスク一覧を表示
-        println!("Usage: async locals <TaskId>");
-        println!();
-        println!("Available tasks:");
-        let tasks: Vec<_> = debugger.async_tracker().all_tasks().into_iter().collect();
-        if tasks.is_empty() {
-            println!("  (none - use 'async tasks' to see all tracked tasks)");
-        } else {
-            for task in tasks {
-                println!("  Task {:#x} ({})",
-                    task.id,
-                    task.type_name.as_deref().unwrap_or("<unknown>"));
-            }
-        }
-        return Ok(());
-    }
-
-    let task_id_str = parts[1];
-    let task_id = kokia_core::parse::parse_address(task_id_str)
-        .map_err(|e| anyhow::anyhow!("Invalid TaskId: {}", e))?;
-
-    // Async local variablesを取得
-    match debugger.get_async_locals(task_id) {
+    // 現在のフレームのローカル変数を取得
+    match debugger.get_async_locals() {
         Ok(variables) => {
             if variables.is_empty() {
-                println!("No local variables found for task {:#x}", task_id);
+                println!("No local variables found at current frame");
                 println!("Note: Variables may be optimized out. Try compiling with -C opt-level=0");
                 return Ok(());
             }
 
-            println!("Local variables for task {:#x}:", task_id);
+            println!("Local variables at current frame:");
             for var in &variables {
                 print!("  {} : {}", var.name, var.type_name);
 
@@ -625,7 +595,6 @@ fn handle_async_locals(debugger: &mut Debugger, cmd: &str) -> Result<()> {
         Err(e) => {
             println!("Failed to get async local variables: {}", e);
             println!("Ensure the binary was compiled with debug info (-C debuginfo=2)");
-            println!("Hint: Use 'async tasks' to see all available task IDs");
         }
     }
 
@@ -708,7 +677,7 @@ fn handle_async_command(debugger: &mut Debugger, cmd: &str) -> Result<()> {
         let async_symbols = debugger.find_async_symbols();
         print_symbol_list("Async-related symbols", &async_symbols, None);
     } else if cmd.starts_with("locals") {
-        handle_async_locals(debugger, cmd)?;
+        handle_async_locals(debugger)?;
     } else {
         println!("Unknown async command: {}", cmd);
     }

@@ -603,4 +603,159 @@ fn read_rust_str(mem: &dyn Mem, ptr: u64, len: usize) -> DisplayVal {
 * `RUSTFLAGS="-C debuginfo=2 -C force-frame-pointers=yes"`（P0 は `-C opt-level=0` を推奨）
 * LTO 無効、`panic=unwind`、strip 無効
 
-え
+---
+
+## 12. Task と Async Backtrace の概念的違い
+
+**重要**: Task（タスク）と Async Backtrace（async バックトレース）は**異なる概念**であり、混同してはならない。
+
+### 12.1 Task とは
+
+* **定義**: `tokio::spawn` 等で生成された**独立した実行単位**
+* **識別**: generator の `self` ポインタ（`TaskId = self_ptr`）で一意に識別
+* **ライフサイクル**: spawn → poll の繰り返し → 完了/キャンセル
+* **スコープ**: タスクは**独立して追跡**され、親タスクとの関係は `.await` を通じた間接的なもの
+
+**例**:
+```rust
+let task1 = tokio::spawn(async { ... });
+let task2 = tokio::spawn(async { ... });
+task1.await;
+task2.await;
+```
+→ `task1` と `task2` はそれぞれ独立した Task
+
+### 12.2 Async Backtrace とは
+
+* **定義**: **await チェーン**で構成される poll の連鎖的呼び出し
+* **類比**: 通常の関数呼び出しにおける**コールスタック**に相当
+* **構成**: 現在実行中の async 関数から、それを `.await` している親 async 関数へと遡る**論理的なスタックフレーム**
+* **スコープ**: ある時点での**一連の Future::poll 呼び出しチェーン**
+
+**例**:
+```rust
+async fn a() {
+    b().await;
+}
+async fn b() {
+    c().await;  // ← ここでブレークポイント
+}
+async fn c() { ... }
+```
+→ ブレークポイント時点での async backtrace: `c` → `b` → `a`
+
+### 12.3 async locals の正しい実装
+
+`async locals` コマンドは**現在のブレークポイント位置**でのローカル変数を表示する機能であり、**Task ID を引数に取るべきではない**。
+
+#### 表示すべき変数の種類
+
+1. **Generator state machine 内の変数**
+   - `.await` を跨いで保持される必要がある変数
+   - Generator（Future 実装構造体）のフィールドとして保存
+   - discriminant（状態）に応じた active variant のフィールドから取得
+
+2. **スタック上のローカル変数**
+   - `.await` を跨がないため、通常の関数と同様にスタック/レジスタに配置
+   - DWARF location expressions で取得
+   - 現在の RIP、レジスタ状態、スタックフレームから評価
+
+#### 実装方針
+
+```rust
+pub fn get_async_locals_at_current_frame() -> Result<Vec<Variable>> {
+    let current_pc = get_current_pc();
+    let current_frame = get_current_frame();
+    let registers = get_current_registers();
+
+    let mut variables = Vec::new();
+
+    // 1) DWARF location evaluation: スタック/レジスタ上の変数
+    //    - await を跨がない通常のローカル変数
+    //    - DW_TAG_variable, DW_TAG_formal_parameter から取得
+    let dwarf_vars = evaluate_dwarf_locals(current_pc, current_frame, registers)?;
+    variables.extend(dwarf_vars);
+
+    // 2) Generator state machine: Future 構造体内の変数
+    //    - await を跨いで保持される変数
+    //    - 現在の async 関数が generator の場合のみ
+    if let Some(generator_self) = detect_generator_self(current_frame) {
+        let discriminant = read_discriminant(generator_self)?;
+        let generator_vars = extract_generator_fields(generator_self, discriminant)?;
+
+        // アドレスベースでマージ（同じアドレスなら DWARF 名を優先）
+        merge_variables(&mut variables, generator_vars);
+    }
+
+    Ok(variables)
+}
+```
+
+#### CLI 仕様
+
+**現在の仕様（誤り）**:
+```
+(kokia) async locals <TaskId>
+```
+→ Task ID を指定する必要があり、概念的に誤っている
+
+**正しい仕様**:
+```
+(kokia) async locals
+```
+→ 引数なし。現在のブレークポイント位置（現在の async 関数フレーム）のローカル変数を表示
+
+**通常の `locals` コマンドとの統合**:
+```
+(kokia) locals
+```
+→ 現在のフレームが async 関数の場合、自動的に generator 変数も含めて表示
+→ 通常の関数の場合、DWARF location evaluation のみ
+
+### 12.4 実装上の注意点
+
+1. **Task tracking との分離**
+   - Task tracking (`async tasks`, `async edges`) は Task の生成・完了・親子関係を追跡
+   - Async locals は**現在の実行位置**でのローカル変数を表示
+   - これらは独立した機能
+
+2. **Generator self ポインタの検出**
+   - 現在のフレームが `GenFuture::poll` または async 関数の場合
+   - 第一引数（`self`）から generator のアドレスを取得
+   - DWARF で関数名と型情報を確認
+
+3. **変数のマージ**
+   - DWARF 変数と generator フィールドが同じアドレスを指す場合
+   - DWARF の変数名を優先（ソースコード上の名前）
+   - Generator のフィールド名は `(aka __await_3)` のように補足情報として表示
+
+4. **最適化への対応**
+   - O2 等で最適化された場合、DWARF location が `optimized-out` の可能性
+   - この場合でも generator フィールドから値を取得できる可能性がある
+   - 両方で取得できない場合のみ `<optimized out>` と表示
+
+---
+
+## 13. 実装修正タスク
+
+以下の修正を行う：
+
+1. **コマンドインターフェース**
+   - `async locals <TaskId>` → `async locals` に変更
+   - 引数は不要（現在のフレームから自動検出）
+
+2. **`get_async_locals` 関数の書き直し**
+   - 引数: `task_id: u64` → 引数なし
+   - 現在の PC、フレーム、レジスタから変数を取得
+   - Generator self は現在のフレームから検出
+
+3. **`locals` コマンドとの統合**
+   - 現在のフレームが async 関数かを判定
+   - async 関数の場合、generator 変数も自動的に含める
+   - 通常の関数と同じ UI で表示
+
+4. **DWARF location evaluation の優先**
+   - スタック/レジスタ上の変数を DWARF から取得
+   - Generator フィールドはフォールバック/補完として使用
+
+---

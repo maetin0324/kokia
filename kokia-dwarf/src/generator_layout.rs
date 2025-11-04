@@ -82,8 +82,8 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                         sample_names.push(name.clone());
                     }
 
-                    // generator型は "{closure_env" や "{async_block_env" という名前を持つ
-                    if name.contains("{closure") || name.contains("{async_block") {
+                    // generator型は "{closure_env", "{async_block_env", "{async_fn_env" という名前を持つ
+                    if name.contains("{closure") || name.contains("{async_block") || name.contains("{async_fn") {
                         closure_types_found += 1;
                         if closure_types_found <= 10 {
                             eprintln!("DEBUG: Found closure type in DWARF: '{}'", name);
@@ -100,8 +100,8 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                         // 2. トップレベルでmodule pathが一致する型
                         let type_prefix = type_name.split("::{{").next().unwrap_or(type_name);
 
-                        // パターン1: {async_block_env#0} 単独（最優先）
-                        if name == "{async_block_env#0}" || name == "{closure_env#0}" {
+                        // パターン1: {async_block_env#0}, {async_fn_env#0} 単独（最優先）
+                        if name == "{async_block_env#0}" || name == "{closure_env#0}" || name == "{async_fn_env#0}" {
                             eprintln!("DEBUG: Matched generator state machine: '{}' with '{}'",
                                 name, type_name);
                             // discriminantフィールドを探す
@@ -113,7 +113,8 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                             if name.starts_with(type_prefix) {
                                 true
                             } else if let Some(content) = name.strip_prefix("{closure_env#0}<")
-                                        .or_else(|| name.strip_prefix("{async_block_env#0}<")) {
+                                        .or_else(|| name.strip_prefix("{async_block_env#0}<"))
+                                        .or_else(|| name.strip_prefix("{async_fn_env#0}<")) {
                                 content.starts_with(type_prefix)
                             } else {
                                 false
@@ -318,12 +319,13 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                 || entry.tag() == gimli::DW_TAG_enumeration_type
             {
                 if let Some(name) = self.get_entry_name(entry)? {
-                    if name.contains("{closure") || name.contains("{async_block") {
+                    if name.contains("{closure") || name.contains("{async_block") || name.contains("{async_fn") {
                         // マッチングロジック（get_discriminant_layoutと同じ）
                         let type_prefix = type_name.split("::{{").next().unwrap_or(type_name);
 
-                        // パターン1: {async_block_env#0} 単独（最優先）
-                        if name == "{async_block_env#0}" || name == "{closure_env#0}" {
+                        // パターン1: {async_block_env#0}, {async_fn_env#0} 単独（最優先）
+                        if name == "{async_block_env#0}" || name == "{closure_env#0}" || name == "{async_fn_env#0}" {
+                            eprintln!("DEBUG: find_variant_in_unit matched type '{}', extracting variant for discriminant={}", name, discriminant_value);
                             return self.extract_variant_info(unit, entry, discriminant_value);
                         }
 
@@ -332,7 +334,8 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
                             if name.starts_with(type_prefix) {
                                 true
                             } else if let Some(content) = name.strip_prefix("{closure_env#0}<")
-                                        .or_else(|| name.strip_prefix("{async_block_env#0}<")) {
+                                        .or_else(|| name.strip_prefix("{async_block_env#0}<"))
+                                        .or_else(|| name.strip_prefix("{async_fn_env#0}<")) {
                                 content.starts_with(type_prefix)
                             } else {
                                 false
@@ -358,31 +361,73 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
         parent: &gimli::DebuggingInformationEntry<R>,
         discriminant_value: u64,
     ) -> Result<Option<VariantInfo>> {
+        eprintln!("DEBUG: extract_variant_info called for discriminant={}", discriminant_value);
         let mut tree = unit.entries_tree(Some(parent.offset()))?;
         let root = tree.root()?;
 
         // 子要素（variant）を走査
         let mut children = root.children();
+        let mut variant_count = 0;
         while let Some(child) = children.next()? {
             let entry = child.entry();
+            eprintln!("DEBUG: Examining child tag: {:?}", entry.tag());
 
-            // DW_TAG_variant を探す
-            if entry.tag() == gimli::DW_TAG_variant || entry.tag() == gimli::DW_TAG_variant_part {
+            // DW_TAG_variant_part を探す（variantのコンテナ）
+            if entry.tag() == gimli::DW_TAG_variant_part {
+                eprintln!("DEBUG: Found variant_part, examining its children");
+                // variant_partの子要素（実際のvariant）を走査
+                let mut variant_children = child.children();
+                while let Some(variant_child) = variant_children.next()? {
+                    let variant_entry = variant_child.entry();
+
+                    if variant_entry.tag() == gimli::DW_TAG_variant {
+                        variant_count += 1;
+                        eprintln!("DEBUG: Found variant #{}", variant_count);
+
+                        // discriminant値が一致するか確認
+                        if let Some(discr_val) = self.get_variant_discriminant(variant_entry)? {
+                            eprintln!("DEBUG: Variant has discriminant={}, looking for={}", discr_val, discriminant_value);
+                            if discr_val == discriminant_value {
+                                // variant名とフィールドを抽出
+                                let name = self.get_entry_name(variant_entry)?
+                                    .unwrap_or_else(|| format!("Variant{}", discriminant_value));
+                                eprintln!("DEBUG: Found matching variant: {}", name);
+                                let fields = self.extract_variant_fields(unit, variant_child)?;
+                                eprintln!("DEBUG: Extracted {} fields from variant", fields.len());
+
+                                return Ok(Some(VariantInfo { name, fields }));
+                            }
+                        } else {
+                            eprintln!("DEBUG: Variant has no discriminant value");
+                        }
+                    }
+                }
+            }
+            // 直接のDW_TAG_variantも処理（フォールバック）
+            else if entry.tag() == gimli::DW_TAG_variant {
+                variant_count += 1;
+                eprintln!("DEBUG: Found variant #{}", variant_count);
                 // discriminant値が一致するか確認
                 if let Some(discr_val) = self.get_variant_discriminant(entry)? {
+                    eprintln!("DEBUG: Variant has discriminant={}, looking for={}", discr_val, discriminant_value);
                     if discr_val == discriminant_value {
                         // variant名とフィールドを抽出
                         let name = self.get_entry_name(entry)?
                             .unwrap_or_else(|| format!("Variant{}", discriminant_value));
+                        eprintln!("DEBUG: Found matching variant: {}", name);
                         let fields = self.extract_variant_fields(unit, child)?;
+                        eprintln!("DEBUG: Extracted {} fields from variant", fields.len());
 
                         return Ok(Some(VariantInfo { name, fields }));
                     }
+                } else {
+                    eprintln!("DEBUG: Variant has no discriminant value");
                 }
             }
         }
 
         // variantが見つからなかった場合、デフォルト情報を返す
+        eprintln!("DEBUG: No matching variant found, returning default empty variant");
         Ok(Some(VariantInfo {
             name: format!("State{}", discriminant_value),
             fields: Vec::new(),
@@ -417,12 +462,63 @@ impl<'a> GeneratorLayoutAnalyzer<'a> {
             let entry = child.entry();
 
             if entry.tag() == gimli::DW_TAG_member {
+                // このメンバーが参照している型を取得
+                if let Some(gimli::AttributeValue::UnitRef(type_offset)) = entry.attr_value(gimli::DW_AT_type)? {
+                    // 型DIEを取得
+                    let mut type_entries = unit.entries_at_offset(type_offset)?;
+                    if let Some((_, type_entry)) = type_entries.next_dfs()? {
+                        // 型が構造体の場合、その中のフィールドを抽出
+                        if type_entry.tag() == gimli::DW_TAG_structure_type {
+                            eprintln!("DEBUG: Found structure type in variant, extracting fields from it");
+                            // 構造体の中のフィールドを再帰的に取得
+                            let struct_fields = self.extract_struct_fields(unit, type_entry)?;
+                            fields.extend(struct_fields);
+                        } else {
+                            // 構造体ではない場合は、メンバー自体をフィールドとして扱う
+                            if let Some(field) = self.extract_field_info(unit, entry)? {
+                                fields.push(field);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(fields)
+    }
+
+    /// 構造体のフィールドを抽出
+    fn extract_struct_fields<R: Reader<Offset = usize>>(
+        &self,
+        unit: &gimli::Unit<R>,
+        struct_entry: &gimli::DebuggingInformationEntry<R>,
+    ) -> Result<Vec<FieldInfo>> {
+        eprintln!("DEBUG: extract_struct_fields called for entry at offset {:?}", struct_entry.offset());
+        let mut fields = Vec::new();
+
+        // 構造体のサブツリーを作成
+        let mut tree = unit.entries_tree(Some(struct_entry.offset()))?;
+        let root = tree.root()?;
+
+        // 構造体の子要素（フィールド）を走査
+        let mut children = root.children();
+        let mut child_count = 0;
+        while let Some(child) = children.next()? {
+            child_count += 1;
+            let entry = child.entry();
+            eprintln!("DEBUG: Examining struct child #{}: tag={:?}", child_count, entry.tag());
+
+            if entry.tag() == gimli::DW_TAG_member {
+                eprintln!("DEBUG: Found DW_TAG_member");
                 if let Some(field) = self.extract_field_info(unit, entry)? {
+                    eprintln!("DEBUG: Extracted field: name={}, offset={}, size={}",
+                             field.name, field.offset, field.size);
                     fields.push(field);
                 }
             }
         }
 
+        eprintln!("DEBUG: extract_struct_fields found {} children, {} fields", child_count, fields.len());
         Ok(fields)
     }
 

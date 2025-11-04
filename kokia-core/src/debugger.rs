@@ -1036,158 +1036,212 @@ impl Debugger {
         Ok(variables)
     }
 
-    /// async タスク（generator）のローカル変数を取得する
+    /// 現在のPCがasync関数（generator）かを判定し、selfポインタと型名を返す
     ///
     /// # Arguments
-    /// * `task_id` - タスクID（generator self_ptr）
+    /// * `pc` - 現在のプログラムカウンタ
+    /// * `registers` - 現在のレジスタ状態
     ///
     /// # Returns
-    /// 現在のvariantに属するフィールドのリスト
-    pub fn get_async_locals(&self, task_id: u64) -> Result<Vec<kokia_dwarf::Variable>> {
+    /// async関数の場合は Some((self_pointer, type_name))、そうでない場合は None
+    fn detect_generator_self(&self, pc: u64, registers: &Registers) -> Result<Option<(u64, String)>> {
+        // PCをオフセットに変換
+        let pc_offset = self.runtime_addr_to_offset(pc).unwrap_or(pc);
+
+        // 現在のPCの関数名を取得
+        if let Some(symbol_resolver) = &self.symbol_resolver {
+            if let Some(symbol) = symbol_resolver.reverse_resolve(pc_offset) {
+                // デマングルされた名前を使用（async関数の判定にはこちらが適している）
+                let func_name = &symbol.demangled_name;
+                eprintln!("DEBUG: detect_generator_self at function: {} (demangled)", func_name);
+
+                // async関数（generator）かを判定
+                // async_block_env, async_fn_env, closure_env を含む関数名はasync関数
+                if func_name.contains("{closure}") || func_name.contains("{async_block") || func_name.contains("{async_fn") || func_name.contains("{closure_env") {
+                    // 第一引数（RDI）がgenerator selfポインタ
+                    let self_ptr = registers.get_rdi()?;
+                    eprintln!("DEBUG: Detected async function, self_ptr = 0x{:x}", self_ptr);
+                    return Ok(Some((self_ptr, func_name.clone())));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// 現在のフレームのローカル変数を取得する（async関数対応）
+    ///
+    /// 現在停止しているasync関数のローカル変数を取得します。
+    /// - DWARF location evaluation: スタック/レジスタ上の変数
+    /// - Generator state machine: Future構造体内の変数（.awaitを跨ぐ変数）
+    ///
+    /// # Returns
+    /// ローカル変数のリスト
+    pub fn get_async_locals(&self) -> Result<Vec<kokia_dwarf::Variable>> {
         use kokia_dwarf::{GeneratorLayoutAnalyzer, Variable, VariableLocation, VariableValue, VariableLocator};
 
         let loader = self.dwarf_loader.as_ref()
             .ok_or_else(|| anyhow::anyhow!(errors::ERR_DWARF_NOT_LOADED))?;
         let memory = self.require_memory()?;
 
-        // TaskInfoから RIP と型名を取得
-        let task_info = self.async_tracker.get_task(task_id);
-        let rip = task_info.and_then(|task| task.last_rip);
-        let type_name = task_info.and_then(|task| task.type_name.clone());
+        // 現在のPCとレジスタ状態を取得
+        let registers = self.registers()
+            .ok_or_else(|| anyhow::anyhow!("Registers not available"))?;
+        let pc = registers.get_pc()?;
 
-        eprintln!("DEBUG: get_async_locals for task 0x{:x}", task_id);
-        eprintln!("DEBUG: RIP = {:?}", rip);
-        eprintln!("DEBUG: Type name = {:?}", type_name);
+        eprintln!("DEBUG: get_async_locals at PC 0x{:x}", pc);
 
-        let mut dwarf_variables = Vec::new();
+        // 現在のフレームがasync関数（generator）かを判定
+        // async関数の場合、第一引数（RDI）がgenerator selfポインタ
+        let generator_self = self.detect_generator_self(pc, registers)?;
 
-        // 戦略1: DWARF ロケーション評価（RIPが判明している場合）
-        if let Some(pc) = rip {
-            eprintln!("DEBUG: Attempting DWARF location evaluation at PC 0x{:x}", pc);
+        // レジスタ状態を取得（DWARF location evaluationで使用）
+        let regs = registers.read()?;
 
-            // PIE対応: ランタイムアドレスをオフセットに変換
-            let pc_offset = match self.runtime_addr_to_offset(pc) {
-                Ok(offset) => {
-                    eprintln!("DEBUG: Converted PC 0x{:x} -> offset 0x{:x}", pc, offset);
-                    offset
-                }
-                Err(e) => {
-                    eprintln!("DEBUG: Failed to convert PC to offset: {}", e);
-                    pc // フォールバック: そのまま使用
-                }
-            };
+        let mut result_variables = Vec::new();
 
-            let locator = VariableLocator::new(loader);
+        // 戦略1: DWARF ロケーション評価（スタック/レジスタ上の変数）
+        eprintln!("DEBUG: Attempting DWARF location evaluation at PC 0x{:x}", pc);
 
-            // レジスタ値取得コールバック（現在はダミー実装）
-            let get_reg = |_reg: u16| -> Result<u64> {
-                // TODO: 実際のレジスタ値を取得する実装
-                // 現時点ではタスクが停止中のため、レジスタ値は不明
-                Err(anyhow::anyhow!("Register values not available for suspended task"))
-            };
-
-            // メモリ読み取りコールバック
-            let read_mem = |addr: u64, size: usize| -> Result<Vec<u8>> {
-                memory.read(addr as usize, size)
-                    .map_err(|e| anyhow::anyhow!("Memory read failed: {}", e))
-            };
-
-            // フレームベース（task_id = self ポインタをフレームベースとして使用）
-            let frame_base = Some(task_id);
-
-            // DWARFロケーション評価を実行（オフセットアドレスを使用）
-            match locator.get_locals_with_values(pc_offset, frame_base, get_reg, read_mem) {
-                Ok(vars) => {
-                    eprintln!("DEBUG: DWARF found {} variables", vars.len());
-                    dwarf_variables = vars;
-                }
-                Err(e) => {
-                    eprintln!("Warning: DWARF variable extraction failed: {}", e);
-                }
-            }
-        } else {
-            eprintln!("DEBUG: No RIP available, skipping DWARF evaluation");
-        }
-
-        // 戦略2: Generator レイアウト（フォールバック）
-        let discriminant = self.read_discriminant(task_id, type_name.as_deref()).unwrap_or(0);
-        eprintln!("DEBUG: Generator discriminant = {}", discriminant);
-
-        let analyzer = GeneratorLayoutAnalyzer::new(loader.dwarf());
-
-        // 型名が取得できている場合はそれを使用、できていない場合は空文字列
-        let func_name = type_name.as_deref().unwrap_or("");
-        eprintln!("DEBUG: Looking for generator variant with func_name='{}' and discriminant={}", func_name, discriminant);
-
-        let mut generator_variables = Vec::new();
-        match analyzer.get_variant_info(func_name, discriminant) {
-            Ok(Some(variant_info)) => {
-                eprintln!("DEBUG: Generator found {} fields", variant_info.fields.len());
-                for field in variant_info.fields {
-                let addr = task_id + field.offset;
-
-                // フィールドの値を読み取る
-                let value = match field.size {
-                    1 => memory.read_u8(addr as usize).ok()
-                        .map(|v| VariableValue::UnsignedInteger(v as u64)),
-                    2 => memory.read_u16(addr as usize).ok()
-                        .map(|v| VariableValue::UnsignedInteger(v as u64)),
-                    4 => memory.read_u32(addr as usize).ok()
-                        .map(|v| VariableValue::UnsignedInteger(v as u64)),
-                    8 => memory.read_u64(addr as usize).ok()
-                        .map(|v| VariableValue::UnsignedInteger(v)),
-                    _ => memory.read(addr as usize, field.size as usize).ok()
-                        .map(|bytes| VariableValue::Bytes(bytes)),
-                };
-
-                    generator_variables.push(Variable {
-                        name: field.name,
-                        type_name: field.type_name.unwrap_or_else(|| format!("{} bytes", field.size)),
-                        value,
-                        location: VariableLocation::Address(addr),
-                    });
-                }
-            }
-            Ok(None) => {
-                eprintln!("DEBUG: No variant info found for discriminant {}", discriminant);
+        // PIE対応: ランタイムアドレスをオフセットに変換
+        let pc_offset = match self.runtime_addr_to_offset(pc) {
+            Ok(offset) => {
+                eprintln!("DEBUG: Converted PC 0x{:x} -> offset 0x{:x}", pc, offset);
+                offset
             }
             Err(e) => {
-                eprintln!("DEBUG: Generator layout analysis failed: {}", e);
+                eprintln!("DEBUG: Failed to convert PC to offset: {}", e);
+                pc // フォールバック: そのまま使用
+            }
+        };
+
+        let locator = VariableLocator::new(loader);
+
+        // レジスタ値取得コールバック（現在のレジスタ状態を使用）
+        // x86_64 DWARF register mapping
+        let get_reg = |reg: u16| -> Result<u64> {
+            let val = match reg {
+                0 => regs.rax,
+                1 => regs.rdx,
+                2 => regs.rcx,
+                3 => regs.rbx,
+                4 => regs.rsi,
+                5 => regs.rdi,
+                6 => regs.rbp,
+                7 => regs.rsp,
+                8 => regs.r8,
+                9 => regs.r9,
+                10 => regs.r10,
+                11 => regs.r11,
+                12 => regs.r12,
+                13 => regs.r13,
+                14 => regs.r14,
+                15 => regs.r15,
+                16 => regs.rip,
+                _ => return Err(anyhow::anyhow!("Unsupported register number: {}", reg)),
+            };
+            Ok(val)
+        };
+
+        // メモリ読み取りコールバック
+        let read_mem = |addr: u64, size: usize| -> Result<Vec<u8>> {
+            memory.read(addr as usize, size)
+                .map_err(|e| anyhow::anyhow!("Memory read failed: {}", e))
+        };
+
+        // フレームベース（RBP）を使用
+        let frame_base = Some(regs.rbp);
+
+        // DWARFロケーション評価を実行（オフセットアドレスを使用）
+        match locator.get_locals_with_values(pc_offset, frame_base, get_reg, read_mem) {
+            Ok(vars) => {
+                eprintln!("DEBUG: DWARF found {} variables", vars.len());
+                result_variables = vars;
+            }
+            Err(e) => {
+                eprintln!("Warning: DWARF variable extraction failed: {}", e);
             }
         }
 
-        // マージ: DWARFとGeneratorの変数をアドレスでマージ
-        // DWARF変数を優先し、同じアドレスのGenerator変数は除外
-        let mut result = dwarf_variables;
+        // 戦略2: Generator レイアウト（Future構造体内の変数）
+        if let Some((self_ptr, type_name)) = generator_self {
+            eprintln!("DEBUG: Extracting generator variables from self_ptr=0x{:x}", self_ptr);
 
-        // DWARFで見つかったアドレスを収集
-        let dwarf_addrs: std::collections::HashSet<u64> = result.iter()
-            .filter_map(|v| {
-                if let VariableLocation::Address(addr) = v.location {
-                    Some(addr)
+            // Discriminantを読み取る
+            let discriminant = self.read_discriminant(self_ptr, Some(&type_name)).unwrap_or(0);
+            eprintln!("DEBUG: Generator discriminant = {}", discriminant);
+
+            let analyzer = GeneratorLayoutAnalyzer::new(loader.dwarf());
+
+            eprintln!("DEBUG: Looking for generator variant with func_name='{}' and discriminant={}", type_name, discriminant);
+
+            let mut generator_variables = Vec::new();
+            match analyzer.get_variant_info(&type_name, discriminant) {
+                Ok(Some(variant_info)) => {
+                    eprintln!("DEBUG: Generator found {} fields", variant_info.fields.len());
+                    for field in variant_info.fields {
+                        let addr = self_ptr + field.offset;
+
+                        // フィールドの値を読み取る
+                        let value = match field.size {
+                            1 => memory.read_u8(addr as usize).ok()
+                                .map(|v| VariableValue::UnsignedInteger(v as u64)),
+                            2 => memory.read_u16(addr as usize).ok()
+                                .map(|v| VariableValue::UnsignedInteger(v as u64)),
+                            4 => memory.read_u32(addr as usize).ok()
+                                .map(|v| VariableValue::UnsignedInteger(v as u64)),
+                            8 => memory.read_u64(addr as usize).ok()
+                                .map(|v| VariableValue::UnsignedInteger(v)),
+                            _ => memory.read(addr as usize, field.size as usize).ok()
+                                .map(|bytes| VariableValue::Bytes(bytes)),
+                        };
+
+                        generator_variables.push(Variable {
+                            name: field.name,
+                            type_name: field.type_name.unwrap_or_else(|| format!("{} bytes", field.size)),
+                            value,
+                            location: VariableLocation::Address(addr),
+                        });
+                    }
+                }
+                Ok(None) => {
+                    eprintln!("DEBUG: No variant info found for discriminant {}", discriminant);
+                }
+                Err(e) => {
+                    eprintln!("DEBUG: Generator layout analysis failed: {}", e);
+                }
+            }
+
+            // マージ: DWARFとGeneratorの変数をアドレスでマージ
+            // DWARF変数を優先し、同じアドレスのGenerator変数は除外
+            let dwarf_addrs: std::collections::HashSet<u64> = result_variables.iter()
+                .filter_map(|v| {
+                    if let VariableLocation::Address(addr) = v.location {
+                        Some(addr)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Generator変数のうち、DWARFで見つからなかったものを追加
+            for gen_var in generator_variables {
+                if let VariableLocation::Address(addr) = gen_var.location {
+                    if !dwarf_addrs.contains(&addr) {
+                        result_variables.push(gen_var);
+                    }
                 } else {
-                    None
+                    result_variables.push(gen_var);
                 }
-            })
-            .collect();
-
-        // Generator変数のうち、DWARFで見つからなかったものを追加
-        for gen_var in generator_variables {
-            if let VariableLocation::Address(addr) = gen_var.location {
-                if !dwarf_addrs.contains(&addr) {
-                    result.push(gen_var);
-                }
-            } else {
-                result.push(gen_var);
             }
         }
 
-        eprintln!("DEBUG: Total {} variables found", result.len());
-        for var in &result {
+        eprintln!("DEBUG: Total {} variables found", result_variables.len());
+        for var in &result_variables {
             eprintln!("  - {} : {} = {:?}", var.name, var.type_name, var.value);
         }
 
-        Ok(result)
+        Ok(result_variables)
     }
 
     /// 変数の値を読み取る
