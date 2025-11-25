@@ -44,6 +44,7 @@ pub enum LocPieceLocation {
 pub struct LocationEvaluator<'a, R: Reader> {
     eval: Option<Evaluation<R>>,
     frame_base: Option<u64>,
+    #[allow(dead_code)]
     encoding: gimli::Encoding,
     _marker: std::marker::PhantomData<&'a ()>,
 }

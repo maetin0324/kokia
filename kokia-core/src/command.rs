@@ -17,6 +17,8 @@ pub enum Command {
     Backtrace,
     /// ローカル変数表示
     Locals,
+    /// 式を評価して値を表示
+    Print(String),
     /// 論理スタック（awaitチェーン）表示
     AsyncBacktrace,
     /// async関数のローカル変数表示
@@ -55,6 +57,13 @@ impl Command {
             "finish" | "f" => Some(Command::Finish),
             "backtrace" | "bt" => Some(Command::Backtrace),
             "locals" | "l" => Some(Command::Locals),
+            "print" | "p" => {
+                if parts.len() > 1 {
+                    Some(Command::Print(parts[1..].join(" ")))
+                } else {
+                    None
+                }
+            }
             "async" => {
                 if parts.len() > 1 {
                     match parts[1] {

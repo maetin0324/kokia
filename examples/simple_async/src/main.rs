@@ -53,12 +53,32 @@ async fn breakpoint() {
     println!("breakpoint() completed");
 }
 
+/// 変数表示テスト用の関数（同期版）
+fn test_variables_sync() {
+    println!("test_variables_sync() called");
+
+    let message = String::from("Hello, Kokia!");
+    let numbers = vec![1, 2, 3, 4, 5];
+    let maybe_value = Some(42);
+    let result_value: Result<i32, String> = Ok(100);
+
+    println!("message: {}", message);
+    println!("numbers: {:?}", numbers);
+    println!("maybe_value: {:?}", maybe_value);
+    println!("result_value: {:?}", result_value);
+
+    println!("test_variables_sync() completed");
+}
+
 /// メイン関数
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     println!("=== Kokia Simple Async Example ===");
     println!("This program demonstrates async/await for debugging with kokia.");
     println!();
+
+    // Test variable display
+    test_variables_sync();
 
     let result = compute(5, 10).await;
 

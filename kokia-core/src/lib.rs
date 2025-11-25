@@ -9,10 +9,12 @@ pub mod command;
 pub mod disasm;
 pub mod errors;
 pub mod parse;
+pub mod expr_eval;
 
 pub use debugger::{Debugger, StackFrame};
 pub use breakpoint::{Breakpoint, BreakpointId, BreakpointType};
 pub use command::Command;
+pub use expr_eval::{Expression, ExpressionEvaluator, EvaluationResult, parse_expression};
 
 // 他のクレートから使用するために再エクスポート
 pub use kokia_dwarf::Symbol;

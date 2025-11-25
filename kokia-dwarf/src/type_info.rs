@@ -76,6 +76,7 @@ pub struct VariantInfo {
 
 /// 型情報抽出器
 pub struct TypeInfoExtractor<'a, R: Reader> {
+    #[allow(dead_code)]
     dwarf: &'a gimli::Dwarf<R>,
 }
 

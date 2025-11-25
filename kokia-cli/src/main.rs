@@ -178,6 +178,7 @@ fn print_symbol_list(title: &str, symbols: &[kokia_core::Symbol], limit: Option<
     }
 }
 
+#[allow(unreachable_patterns)]
 fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
     let parsed_command = Command::parse(line);
 
@@ -191,6 +192,7 @@ fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
         Some(Command::Finish) => handle_finish(debugger)?,
         Some(Command::Backtrace) => handle_backtrace(debugger)?,
         Some(Command::Locals) => handle_locals(debugger)?,
+        Some(Command::Print(expr)) => handle_print(debugger, &expr)?,
         Some(Command::AsyncBacktrace) => handle_async_backtrace(debugger)?,
         Some(Command::AsyncTasks) => handle_async_tasks(debugger)?,
         Some(Command::AsyncEdges) => handle_async_edges(debugger)?,
@@ -487,7 +489,7 @@ fn handle_backtrace(debugger: &mut Debugger) -> Result<()> {
 
 /// Localsコマンドを処理する
 fn handle_locals(debugger: &mut Debugger) -> Result<()> {
-    use kokia_dwarf::VariableLocation;
+    use kokia_dwarf::{VariableLocation, ValueFormatter};
 
     match debugger.get_local_variables() {
         Ok(variables) => {
@@ -497,16 +499,64 @@ fn handle_locals(debugger: &mut Debugger) -> Result<()> {
                 return Ok(());
             }
 
+            // ValueFormatterを作成（メモリアクセス用）
+            let memory = debugger.memory();
+            let registers = debugger.registers();
+
             println!("Local variables:");
             for var in &variables {
                 print!("  {} : {}", var.name, var.type_name);
 
-                // 値を表示
-                if let Some(ref value) = var.value {
-                    print!(" = {}", value);
+                // 型名と変数のアドレスから値をフォーマット
+                let formatted_value = if let (Some(mem), Some(regs)) = (memory, registers) {
+                    match &var.location {
+                        VariableLocation::Address(addr) => {
+                            let formatter = ValueFormatter::new(mem);
+                            formatter.format_by_type(*addr, &var.type_name)
+                                .unwrap_or_else(|_| format!("<error reading value>"))
+                        }
+                        VariableLocation::FrameOffset(offset) => {
+                            // RBPからのオフセットを計算してアドレスを取得
+                            if let Ok(rbp) = regs.get_rbp() {
+                                let addr = if *offset < 0 {
+                                    rbp.wrapping_sub(offset.unsigned_abs())
+                                } else {
+                                    rbp.wrapping_add(*offset as u64)
+                                };
+
+                                let formatter = ValueFormatter::new(mem);
+                                formatter.format_by_type(addr, &var.type_name)
+                                    .unwrap_or_else(|_| {
+                                        // フォーマット失敗時は元の値を表示
+                                        if let Some(ref value) = var.value {
+                                            format!("{}", value)
+                                        } else {
+                                            format!("<unavailable>")
+                                        }
+                                    })
+                            } else {
+                                format!("<rbp unavailable>")
+                            }
+                        }
+                        _ => {
+                            // その他の場合は元の値を表示
+                            if let Some(ref value) = var.value {
+                                format!("{}", value)
+                            } else {
+                                format!("<unavailable>")
+                            }
+                        }
+                    }
                 } else {
-                    print!(" = <unavailable>");
-                }
+                    // メモリアクセスできない場合は元の値を表示
+                    if let Some(ref value) = var.value {
+                        format!("{}", value)
+                    } else {
+                        format!("<unavailable>")
+                    }
+                };
+
+                print!(" = {}", formatted_value);
 
                 // ロケーション情報（デバッグ用）
                 match &var.location {
@@ -532,6 +582,58 @@ fn handle_locals(debugger: &mut Debugger) -> Result<()> {
             println!("Failed to get local variables: {}", e);
             println!("Ensure the binary was compiled with debug info (-C debuginfo=2)");
         }
+    }
+
+    Ok(())
+}
+
+/// Printコマンドを処理する
+fn handle_print(debugger: &mut Debugger, expr: &str) -> Result<()> {
+    use kokia_core::{parse_expression, ExpressionEvaluator};
+    use kokia_dwarf::ValueFormatter;
+
+    // 式をパース
+    let expression = match parse_expression(expr) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("Failed to parse expression '{}': {}", expr, e);
+            return Ok(());
+        }
+    };
+
+    // 式を評価
+    let evaluator = ExpressionEvaluator::new(debugger);
+    let result = match evaluator.evaluate(&expression) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("Failed to evaluate expression '{}': {}", expr, e);
+            return Ok(());
+        }
+    };
+
+    // 値をフォーマットして表示
+    if let Some(memory) = debugger.memory() {
+        let formatter = ValueFormatter::new(memory);
+
+        // 型情報がある場合は詳細フォーマット、ない場合は型名ベースフォーマット
+        let formatted = if let Some(type_info) = result.type_info {
+            use kokia_dwarf::FormatOptions;
+            let options = FormatOptions::default();
+            formatter.format_with_type_info(result.address, &type_info, options)
+                .unwrap_or_else(|_| {
+                    // 型情報ベースで失敗した場合は型名ベースを試す
+                    formatter.format_by_type(result.address, &result.type_name)
+                        .unwrap_or_else(|_| format!("<error reading value>"))
+                })
+        } else {
+            // 型情報がない場合は型名ベースでフォーマット
+            formatter.format_by_type(result.address, &result.type_name)
+                .unwrap_or_else(|_| format!("<error reading value>"))
+        };
+
+        println!("{} = {}", expr, formatted);
+    } else {
+        println!("Cannot read memory: process not running");
     }
 
     Ok(())
@@ -816,6 +918,7 @@ fn print_help() {
     println!("  finish (f)     - Execute until current function returns (step out)");
     println!("  backtrace (bt) - Show stack backtrace");
     println!("  locals (l)     - Show local variables");
+    println!("  print <expr>   - Evaluate and print expression (variable, field, array index)");
     println!("  find <pattern> - Find symbols matching pattern");
     println!();
     println!("Async commands:");
@@ -833,6 +936,9 @@ fn print_help() {
     println!("  next");
     println!("  finish");
     println!("  backtrace");
+    println!("  print x");
+    println!("  print obj.field");
+    println!("  print arr[0]");
     println!("  find double");
     println!("  async tasks");
 }

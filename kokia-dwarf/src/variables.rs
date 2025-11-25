@@ -163,7 +163,7 @@ impl<'a> VariableLocator<'a> {
         crate::utils::FunctionFinder::find_at_pc(unit, pc)
     }
 
-    /// ローカル変数を列挙する
+    /// ローカル変数を列挙する（PCは使用しないバージョン）
     fn enumerate_local_variables<R: Reader<Offset = usize>>(
         &self,
         unit: &gimli::Unit<R>,
@@ -173,22 +173,37 @@ impl<'a> VariableLocator<'a> {
         let mut tree = unit.entries_tree(Some(function_offset))?;
         let root = tree.root()?;
 
-        // 関数DIEの子を走査
-        let mut children = root.children();
-        while let Some(child) = children.next()? {
-            let entry = child.entry();
+        // 関数DIEの子を再帰的に走査
+        self.collect_variables_recursive(&mut variables, root, unit)?;
 
-            // DW_TAG_variable または DW_TAG_formal_parameter (引数)
-            if entry.tag() == gimli::DW_TAG_variable
-                || entry.tag() == gimli::DW_TAG_formal_parameter
-            {
-                if let Some(var) = self.extract_variable_info(unit, entry)? {
-                    variables.push(var);
-                }
+        Ok(variables)
+    }
+
+    /// 変数を再帰的に収集する
+    fn collect_variables_recursive<R: Reader<Offset = usize>>(
+        &self,
+        variables: &mut Vec<Variable>,
+        node: gimli::EntriesTreeNode<R>,
+        unit: &gimli::Unit<R>,
+    ) -> Result<()> {
+        let entry = node.entry();
+
+        // DW_TAG_variable または DW_TAG_formal_parameter (引数)
+        if entry.tag() == gimli::DW_TAG_variable
+            || entry.tag() == gimli::DW_TAG_formal_parameter
+        {
+            if let Some(var) = self.extract_variable_info(unit, entry)? {
+                variables.push(var);
             }
         }
 
-        Ok(variables)
+        // 子ノードを再帰的に走査（lexical_blockなど）
+        let mut children = node.children();
+        while let Some(child) = children.next()? {
+            self.collect_variables_recursive(variables, child, unit)?;
+        }
+
+        Ok(())
     }
 
     /// 変数情報を抽出する
@@ -367,29 +382,68 @@ impl<'a> VariableLocator<'a> {
         let mut tree = unit.entries_tree(Some(function_offset))?;
         let root = tree.root()?;
 
-        // 関数DIEの子を走査
-        let mut children = root.children();
-        while let Some(child) = children.next()? {
-            let entry = child.entry();
+        // 関数DIEの子を再帰的に走査
+        self.collect_variables_with_values_recursive(
+            &mut variables,
+            root,
+            unit,
+            frame_base,
+            get_reg,
+            read_mem,
+            decoder,
+        )?;
 
-            // DW_TAG_variable または DW_TAG_formal_parameter (引数)
-            if entry.tag() == gimli::DW_TAG_variable
-                || entry.tag() == gimli::DW_TAG_formal_parameter
-            {
-                if let Some(var) = self.extract_variable_with_value(
-                    unit,
-                    entry,
-                    frame_base,
-                    get_reg,
-                    read_mem,
-                    decoder,
-                )? {
-                    variables.push(var);
-                }
+        Ok(variables)
+    }
+
+    /// 変数を再帰的に収集する（値付き）
+    fn collect_variables_with_values_recursive<R: Reader<Offset = usize>, F, G>(
+        &self,
+        variables: &mut Vec<Variable>,
+        node: gimli::EntriesTreeNode<R>,
+        unit: &gimli::Unit<R>,
+        frame_base: Option<u64>,
+        get_reg: &mut F,
+        read_mem: &mut G,
+        decoder: &ValueDecoder,
+    ) -> Result<()>
+    where
+        F: FnMut(u16) -> Result<u64>,
+        G: FnMut(u64, usize) -> Result<Vec<u8>>,
+    {
+        let entry = node.entry();
+
+        // DW_TAG_variable または DW_TAG_formal_parameter (引数)
+        if entry.tag() == gimli::DW_TAG_variable
+            || entry.tag() == gimli::DW_TAG_formal_parameter
+        {
+            if let Some(var) = self.extract_variable_with_value(
+                unit,
+                entry,
+                frame_base,
+                get_reg,
+                read_mem,
+                decoder,
+            )? {
+                variables.push(var);
             }
         }
 
-        Ok(variables)
+        // 子ノードを再帰的に走査（lexical_blockなど）
+        let mut children = node.children();
+        while let Some(child) = children.next()? {
+            self.collect_variables_with_values_recursive(
+                variables,
+                child,
+                unit,
+                frame_base,
+                get_reg,
+                read_mem,
+                decoder,
+            )?;
+        }
+
+        Ok(())
     }
 
     /// 変数情報を値付きで抽出する

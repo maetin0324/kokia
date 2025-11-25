@@ -344,3 +344,26 @@ impl Memory {
         Ok(data)
     }
 }
+
+/// kokia_dwarfのMemoryReaderトレイトを実装
+impl kokia_dwarf::MemoryReader for Memory {
+    fn read_u8(&self, addr: usize) -> Result<u8> {
+        self.read_u8(addr)
+    }
+
+    fn read_u16(&self, addr: usize) -> Result<u16> {
+        self.read_u16(addr)
+    }
+
+    fn read_u32(&self, addr: usize) -> Result<u32> {
+        self.read_u32(addr)
+    }
+
+    fn read_u64(&self, addr: usize) -> Result<u64> {
+        self.read_u64(addr)
+    }
+
+    fn read(&self, addr: usize, size: usize) -> Result<Vec<u8>> {
+        self.read(addr, size)
+    }
+}

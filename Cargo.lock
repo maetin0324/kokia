@@ -384,6 +384,7 @@ name = "kokia-target"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "kokia-dwarf",
  "nix 0.29.0",
  "thiserror",
 ]

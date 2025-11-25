@@ -9,5 +9,6 @@ license.workspace = true
 nix.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+kokia-dwarf = { path = "../kokia-dwarf" }
 
 [dev-dependencies]
