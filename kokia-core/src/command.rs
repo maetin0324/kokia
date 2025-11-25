@@ -11,6 +11,8 @@ pub enum Command {
     Step,
     /// 次の行へ
     Next,
+    /// 現在の関数から抜けるまで実行
+    Finish,
     /// バックトレース表示
     Backtrace,
     /// ローカル変数表示
@@ -50,6 +52,7 @@ impl Command {
             "continue" | "c" => Some(Command::Continue),
             "step" | "s" => Some(Command::Step),
             "next" | "n" => Some(Command::Next),
+            "finish" | "f" => Some(Command::Finish),
             "backtrace" | "bt" => Some(Command::Backtrace),
             "locals" | "l" => Some(Command::Locals),
             "async" => {

@@ -187,6 +187,8 @@ fn handle_command(debugger: &mut Debugger, line: &str) -> Result<()> {
         Some(Command::Break(loc)) => handle_break(debugger, &loc)?,
         Some(Command::Continue) => handle_continue(debugger)?,
         Some(Command::Step) => handle_step(debugger)?,
+        Some(Command::Next) => handle_next(debugger)?,
+        Some(Command::Finish) => handle_finish(debugger)?,
         Some(Command::Backtrace) => handle_backtrace(debugger)?,
         Some(Command::Locals) => handle_locals(debugger)?,
         Some(Command::AsyncBacktrace) => handle_async_backtrace(debugger)?,
@@ -370,6 +372,74 @@ fn handle_step(debugger: &mut Debugger) -> Result<()> {
         }
         StopReason::Breakpoint => {
             println!("(at breakpoint)");
+        }
+        StopReason::Signal(signal) => {
+            println!("Received signal: {:?}", signal);
+        }
+        StopReason::Exited(code) => {
+            println!("Process exited with code {}", code);
+        }
+        StopReason::Other => {}
+    }
+
+    Ok(())
+}
+
+/// Nextコマンドを処理する（ステップオーバー）
+fn handle_next(debugger: &mut Debugger) -> Result<()> {
+    let stop_reason = debugger.step_over()?;
+
+    // PCを取得
+    let pc = debugger.get_pc()?;
+    println!("Stepped to next line at 0x{:x}", pc);
+
+    // シンボルを逆引き（デマングル済み）
+    if let Some(symbol) = debugger.reverse_resolve(pc) {
+        println!("In function: {}", symbol.demangled_name);
+
+        // ソースファイルと行番号を表示
+        if let Some((file, line)) = debugger.get_line_info(pc) {
+            println!("  at {}:{}", file, line);
+        }
+    }
+
+    match stop_reason {
+        StopReason::Step | StopReason::Breakpoint => {
+            // 通常の完了（テンポラリBPヒットまたは単純ステップ）
+        }
+        StopReason::Signal(signal) => {
+            println!("Received signal: {:?}", signal);
+        }
+        StopReason::Exited(code) => {
+            println!("Process exited with code {}", code);
+        }
+        StopReason::Other => {}
+    }
+
+    Ok(())
+}
+
+/// Finishコマンドを処理する（ステップアウト）
+fn handle_finish(debugger: &mut Debugger) -> Result<()> {
+    let stop_reason = debugger.step_out()?;
+
+    // PCを取得
+    let pc = debugger.get_pc()?;
+    println!("Returned to caller at 0x{:x}", pc);
+
+    // シンボルを逆引き（デマングル済み）
+    if let Some(symbol) = debugger.reverse_resolve(pc) {
+        println!("In function: {}", symbol.demangled_name);
+
+        // ソースファイルと行番号を表示
+        if let Some((file, line)) = debugger.get_line_info(pc) {
+            println!("  at {}:{}", file, line);
+        }
+    }
+
+    match stop_reason {
+        StopReason::Step | StopReason::Breakpoint => {
+            // 通常の完了（テンポラリBPヒットまたは単純ステップ）
         }
         StopReason::Signal(signal) => {
             println!("Received signal: {:?}", signal);
@@ -742,6 +812,8 @@ fn print_help() {
     println!("  break <loc>    - Set breakpoint at symbol or address");
     println!("  continue (c)   - Continue execution");
     println!("  step (s)       - Execute one instruction (step into)");
+    println!("  next (n)       - Execute to next source line (step over)");
+    println!("  finish (f)     - Execute until current function returns (step out)");
     println!("  backtrace (bt) - Show stack backtrace");
     println!("  locals (l)     - Show local variables");
     println!("  find <pattern> - Find symbols matching pattern");
@@ -752,12 +824,14 @@ fn print_help() {
     println!("  async bt       - Show async backtrace (logical stack)");
     println!("  async tasks    - Show all tracked async tasks");
     println!("  async edges    - Show async task parent-child relationships");
-    println!("  async locals <TaskId> - Show local variables for an async task");
+    println!("  async locals   - Show local variables at current async frame");
     println!();
     println!("Examples:");
     println!("  break main");
     println!("  break 0x1234");
     println!("  step");
+    println!("  next");
+    println!("  finish");
     println!("  backtrace");
     println!("  find double");
     println!("  async tasks");

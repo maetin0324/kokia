@@ -16,6 +16,8 @@ pub enum BreakpointType {
     AsyncEntry,
     /// Asyncタスクトラッキング用のブレークポイント（イグジット）
     AsyncExit,
+    /// テンポラリブレークポイント（next/finishコマンド用）
+    Temporary,
 }
 
 /// ブレークポイント

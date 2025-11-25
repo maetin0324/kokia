@@ -648,6 +648,83 @@ impl Debugger {
         Ok(())
     }
 
+    /// 現在の関数から抜けるまで実行する（ステップアウト）
+    ///
+    /// 現在の関数から戻るまで実行を継続し、呼び出し元の関数に戻った時点で停止します。
+    /// スタックフレームのリターンアドレスにテンポラリブレークポイントを設定することで実現します。
+    pub fn step_out(&mut self) -> Result<StopReason> {
+        use crate::breakpoint::BreakpointType;
+
+        // バックトレースを取得
+        let frames = self.backtrace()?;
+
+        // フレーム数が1以下の場合はステップアウトできない
+        if frames.len() <= 1 {
+            return Err(anyhow::anyhow!("Cannot step out: already at top-level frame"));
+        }
+
+        // フレーム1（呼び出し元）のPCがリターンアドレス
+        let return_address = frames[1].pc;
+
+        // リターンアドレスにテンポラリブレークポイントを設定
+        let temp_bp_id = self.set_breakpoint_with_type(return_address, BreakpointType::Temporary)?;
+
+        // 実行継続
+        let stop_reason = self.continue_and_wait()?;
+
+        // テンポラリブレークポイントを削除（失敗しても無視）
+        if let Some(memory) = self.memory.as_ref() {
+            let _ = self.breakpoint_manager.remove_and_disable(temp_bp_id, memory);
+        }
+
+        Ok(stop_reason)
+    }
+
+    /// 次の行まで実行する（ステップオーバー）
+    ///
+    /// 現在の行の次の行まで実行します。関数呼び出しがあっても中に入らず、
+    /// 呼び出しが完了してから次の行で停止します。
+    /// 次の行が見つからない場合、通常のステップ実行と同じ動作になります。
+    pub fn step_over(&mut self) -> Result<StopReason> {
+        use crate::breakpoint::BreakpointType;
+
+        // 現在のPCを取得
+        let registers = self.require_registers()?;
+        let current_pc = registers.get_pc()?;
+
+        // PIE対応のアドレス変換
+        let current_pc_offset = self.runtime_addr_to_offset(current_pc)?;
+
+        // DWARF行番号情報を使って次の行のアドレスを取得
+        let next_line_addr = if let Some(loader) = &self.dwarf_loader {
+            let line_provider = LineInfoProvider::new(loader);
+            line_provider.find_next_line(current_pc_offset)?
+        } else {
+            None
+        };
+
+        // 次の行が見つからない場合は通常のステップ実行
+        let Some(next_line_offset) = next_line_addr else {
+            return self.step();
+        };
+
+        // オフセットを実行時アドレスに変換
+        let next_line_runtime = self.offset_to_runtime_addr(next_line_offset)?;
+
+        // 次の行にテンポラリブレークポイントを設定
+        let temp_bp_id = self.set_breakpoint_with_type(next_line_runtime, BreakpointType::Temporary)?;
+
+        // 実行継続
+        let stop_reason = self.continue_and_wait()?;
+
+        // テンポラリブレークポイントを削除（失敗しても無視）
+        if let Some(memory) = self.memory.as_ref() {
+            let _ = self.breakpoint_manager.remove_and_disable(temp_bp_id, memory);
+        }
+
+        Ok(stop_reason)
+    }
+
     /// 1命令だけ実行する（ステップ実行）
     ///
     /// プロセスの1命令だけを実行し、次の停止イベントまで待機します。

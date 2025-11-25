@@ -210,4 +210,75 @@ impl<'a> LineInfoProvider<'a> {
 
         Ok(None)
     }
+
+    /// 現在の行の次の行のアドレスを検索する
+    ///
+    /// `next`コマンド（ステップオーバー）のために使用。
+    /// 現在のアドレスの行番号を取得し、その次の行のアドレスを返す。
+    ///
+    /// # Arguments
+    /// * `current_addr` - 現在のプログラムカウンタ
+    ///
+    /// # Returns
+    /// 次の行の開始アドレス、見つからない場合はNone
+    pub fn find_next_line(&self, current_addr: u64) -> Result<Option<u64>> {
+        // 現在のアドレスの行情報を取得
+        let current_line_info = match self.lookup(current_addr)? {
+            Some(info) => info,
+            None => return Ok(None),
+        };
+
+        let current_line = match current_line_info.line {
+            Some(line) => line,
+            None => return Ok(None),
+        };
+
+        let current_file = match &current_line_info.file {
+            Some(file) => file.clone(),
+            None => return Ok(None),
+        };
+
+        // 同じファイル内で次の行を検索
+        let dwarf = self.loader.dwarf();
+        let mut units = dwarf.units();
+
+        while let Some(header) = units.next()? {
+            let unit = dwarf.unit(header)?;
+
+            if let Some(line_program) = unit.line_program.clone() {
+                let mut rows = line_program.rows();
+
+                while let Some((_, row)) = rows.next_row()? {
+                    let addr = row.address();
+
+                    // 現在のアドレスより後ろをチェック
+                    if addr <= current_addr {
+                        continue;
+                    }
+
+                    // end_sequenceフラグがセットされている行は無視
+                    if row.end_sequence() {
+                        continue;
+                    }
+
+                    // 行番号情報を取得
+                    if let Some(line) = row.line() {
+                        let line_num = line.get();
+
+                        // 現在の行より大きい行番号をチェック
+                        if line_num > current_line && row.is_stmt() {
+                            // ファイル名が一致するかチェック
+                            if let Some(file_name) = self.get_file_name(&unit, &row) {
+                                if file_name == current_file {
+                                    return Ok(Some(addr));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }
